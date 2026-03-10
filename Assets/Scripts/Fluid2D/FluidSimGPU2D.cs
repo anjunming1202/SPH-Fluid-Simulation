@@ -43,6 +43,9 @@ public class FluidSimGPU2D : MonoBehaviour
     [Tooltip("Hard speed cap — prevents boundary explosion from pressure runaway")]
     public float maxVelocity          = 40f;
 
+    [Tooltip("Per-second velocity decay. Dissipates bottom oscillations. 0=off, 0.5=light, 2=heavy")]
+    public float linearDrag           = 0.5f;
+
     // ── World ────────────────────────────────────────────────────────────────
     [Header("World")]
     public Vector2 boundsSize      = new Vector2(16f, 9f);
@@ -265,6 +268,7 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_InteractionRadius",     interactionRadius);
         computeShader.SetFloat ("_InteractionStrength",   interactionStrength);
         computeShader.SetFloat ("_MaxVelocity",           maxVelocity);
+        computeShader.SetFloat ("_LinearDrag",            linearDrag);
         computeShader.SetInt   ("_DebugMode",             debugDensityColor ? 1 : 0);
 
         Vector2 bMin = -boundsSize * 0.5f;

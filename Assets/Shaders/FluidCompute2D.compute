@@ -51,6 +51,7 @@ float  _MouseSign;          // +1=attract, -1=repel, 0=inactive
 float  _InteractionRadius;
 float  _InteractionStrength;
 float  _MaxVelocity;        // velocity clamp (prevents boundary explosions)
+float  _LinearDrag;         // per-second velocity decay (0=off, ~0.5 typical)
 int    _DebugMode;          // 0=speed color, 1=density color
 float2 _QueryPos;           // world-space position to sample density at
 
@@ -234,6 +235,17 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     uint i = id.x;
 
     float2 vel = _Velocities[i] + _VelocityDelta[i];
+
+    // Clamp right after adding force — prevents single-substep explosions
+    // (GravityPredict clamps too, but the force delta can push beyond limit
+    //  in the same substep before the next clamp fires).
+    float spd = length(vel);
+    if (spd > _MaxVelocity) vel = (vel / spd) * _MaxVelocity;
+
+    // Linear drag: dissipates oscillation energy at the bottom without
+    // noticeably slowing normal fluid flow (keep _LinearDrag <= 1.0).
+    vel *= max(0.0, 1.0 - _LinearDrag * _DeltaTime);
+
     float2 pos = _Positions[i];
 
     // Mouse interaction
