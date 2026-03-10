@@ -3,9 +3,11 @@ Shader "Custom/FluidRenderGPU"
     Properties
     {
         _ParticleSize ("Particle Size", Float) = 0.08
-        _ColorA ("Color Fast", Color) = (1, 0.3, 0.05, 1)
-        _ColorB ("Color Slow", Color) = (0.05, 0.35, 1, 1)
-        _SpeedScale ("Speed Scale (for color)", Float) = 8.0
+        _ColorA ("Color Fast/High", Color) = (1, 0.3, 0.05, 1)
+        _ColorB ("Color Slow/Low",  Color) = (0.05, 0.35, 1, 1)
+        _SpeedScale  ("Speed Scale (normal mode)", Float) = 8.0
+        _DebugScale  ("Debug Scale (density mode)", Float) = 10.0
+        _DebugMode   ("Debug Mode (0=speed 1=density)", Int) = 0
     }
 
     SubShader
@@ -29,10 +31,12 @@ Shader "Custom/FluidRenderGPU"
             // GPU particle data: (pos.x, pos.y, speedSq, unused)
             StructuredBuffer<float4> _RenderData;
 
-            float _ParticleSize;
+            float  _ParticleSize;
             float4 _ColorA;
             float4 _ColorB;
             float  _SpeedScale;
+            float  _DebugScale;
+            int    _DebugMode;
 
             // Called once per instance before vert(); sets unity_ObjectToWorld
             void ConfigureProcedural()
@@ -81,9 +85,10 @@ Shader "Custom/FluidRenderGPU"
                 o.uv = v.uv * 2.0 - 1.0;
 
             #if defined(UNITY_PROCEDURAL_INSTANCING_ENABLED)
-                float speedSq = _RenderData[unity_InstanceID].z;
-                float t = saturate(speedSq / (_SpeedScale * _SpeedScale));
-                o.color = lerp(_ColorB, _ColorA, t);
+                float val   = _RenderData[unity_InstanceID].z;
+                float scale = (_DebugMode == 1) ? _DebugScale : (_SpeedScale * _SpeedScale);
+                float t     = saturate(val / scale);
+                o.color     = lerp(_ColorB, _ColorA, t);
             #else
                 o.color = _ColorB;
             #endif

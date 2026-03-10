@@ -40,6 +40,9 @@ public class FluidSimGPU2D : MonoBehaviour
     [Range(0f, 1f)]
     public float collisionDamping     = 0.4f;
 
+    [Tooltip("Hard speed cap — prevents boundary explosion from pressure runaway")]
+    public float maxVelocity          = 40f;
+
     // ── World ────────────────────────────────────────────────────────────────
     [Header("World")]
     public Vector2 boundsSize      = new Vector2(16f, 9f);
@@ -61,6 +64,14 @@ public class FluidSimGPU2D : MonoBehaviour
 
     public float particleSize = 0.08f;
 
+    // ── Debug tools ──────────────────────────────────────────────────────────
+    [Header("Debug")]
+    [Tooltip("Hold Alt to show density at cursor. 1 = density color mode")]
+    public bool debugDensityColor = false;
+
+    [Tooltip("Density value that maps to full red in density color mode")]
+    public float debugDensityScale = 10f;
+
     // ── Compute shader (required) ────────────────────────────────────────────
     [Header("References")]
     public ComputeShader computeShader;
@@ -80,6 +91,13 @@ public class FluidSimGPU2D : MonoBehaviour
     // ── Kernel IDs ────────────────────────────────────────────────────────────
     int _kClearGrid, _kGravityPredict, _kBuildGrid;
     int _kComputeDensity, _kComputeForce, _kIntegrate, _kBuildRenderData;
+    int _kQueryDensityAtPos;
+
+    // ── Debug query ───────────────────────────────────────────────────────────
+    ComputeBuffer _queryBuffer;     // [0]=density [1]=nearDensity
+    float[]       _queryData = new float[2];
+    Vector2       _queryWorldPos;
+    bool          _queryActive;
 
     // ── Runtime state ─────────────────────────────────────────────────────────
     bool   _paused;
@@ -133,6 +151,7 @@ public class FluidSimGPU2D : MonoBehaviour
         _cellCount      = new ComputeBuffer(_numCells,                    sizeof(uint));
         _cellParticles  = new ComputeBuffer(_numCells * MAX_PER_CELL,     sizeof(uint));
         _renderData     = new ComputeBuffer(numParticles,             4 * sizeof(float));
+        _queryBuffer    = new ComputeBuffer(2,                            sizeof(float));
 
         // Indirect args: indexCount, instanceCount, startIndex, baseVertex, startInstance
         _argsBuffer = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
@@ -145,13 +164,14 @@ public class FluidSimGPU2D : MonoBehaviour
         _argsBuffer.SetData(args);
 
         // Kernel IDs
-        _kClearGrid       = computeShader.FindKernel("ClearGrid");
-        _kGravityPredict  = computeShader.FindKernel("GravityPredict");
-        _kBuildGrid       = computeShader.FindKernel("BuildGrid");
-        _kComputeDensity  = computeShader.FindKernel("ComputeDensity");
-        _kComputeForce    = computeShader.FindKernel("ComputeForce");
-        _kIntegrate       = computeShader.FindKernel("Integrate");
-        _kBuildRenderData = computeShader.FindKernel("BuildRenderData");
+        _kClearGrid          = computeShader.FindKernel("ClearGrid");
+        _kGravityPredict     = computeShader.FindKernel("GravityPredict");
+        _kBuildGrid          = computeShader.FindKernel("BuildGrid");
+        _kComputeDensity     = computeShader.FindKernel("ComputeDensity");
+        _kComputeForce       = computeShader.FindKernel("ComputeForce");
+        _kIntegrate          = computeShader.FindKernel("Integrate");
+        _kBuildRenderData    = computeShader.FindKernel("BuildRenderData");
+        _kQueryDensityAtPos  = computeShader.FindKernel("QueryDensityAtPos");
 
         // Spawn particles in a grid
         SpawnParticles();
@@ -168,7 +188,7 @@ public class FluidSimGPU2D : MonoBehaviour
         }
 
         _initialized = true;
-        _paused      = false;
+        /*_paused      = false;*/
         Debug.Log($"[FluidSimGPU2D] Initialized: {numParticles} particles, grid {_gridW}×{_gridH} ({_numCells} cells)");
     }
 
@@ -208,7 +228,8 @@ public class FluidSimGPU2D : MonoBehaviour
     {
         int[] kernels = {
             _kClearGrid, _kGravityPredict, _kBuildGrid,
-            _kComputeDensity, _kComputeForce, _kIntegrate, _kBuildRenderData
+            _kComputeDensity, _kComputeForce, _kIntegrate,
+            _kBuildRenderData, _kQueryDensityAtPos
         };
 
         foreach (int k in kernels)
@@ -222,6 +243,7 @@ public class FluidSimGPU2D : MonoBehaviour
             computeShader.SetBuffer(k, "_CellCount",     _cellCount);
             computeShader.SetBuffer(k, "_CellParticles", _cellParticles);
             computeShader.SetBuffer(k, "_RenderData",    _renderData);
+            computeShader.SetBuffer(k, "_QueryResult",   _queryBuffer);
         }
     }
 
@@ -243,6 +265,8 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetInt   ("_MaxPerCell",            MAX_PER_CELL);
         computeShader.SetFloat ("_InteractionRadius",     interactionRadius);
         computeShader.SetFloat ("_InteractionStrength",   interactionStrength);
+        computeShader.SetFloat ("_MaxVelocity",           maxVelocity);
+        computeShader.SetInt   ("_DebugMode",             debugDensityColor ? 1 : 0);
 
         Vector2 bMin = -boundsSize * 0.5f;
         Vector2 bMax =  boundsSize * 0.5f;
@@ -265,6 +289,28 @@ public class FluidSimGPU2D : MonoBehaviour
         if (!_paused)
             SimStep();
 
+        // Debug density query: hold Alt to sample density at cursor
+        _queryActive = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+        if (_queryActive)
+        {
+            Vector3 mp = _cam.ScreenToWorldPoint(new Vector3(
+                Input.mousePosition.x, Input.mousePosition.y,
+                Mathf.Abs(_cam.transform.position.z)));
+            _queryWorldPos = new Vector2(mp.x, mp.y);
+
+            computeShader.SetFloats("_QueryPos", _queryWorldPos.x, _queryWorldPos.y);
+            computeShader.Dispatch(_kQueryDensityAtPos, 1, 1, 1);
+            _queryBuffer.GetData(_queryData);   // small sync stall — debug only
+        }
+
+        // Keep material in sync with debug mode toggle
+        if (particleMaterial != null)
+        {
+            particleMaterial.SetInt  ("_DebugMode",  debugDensityColor ? 1 : 0);
+            particleMaterial.SetFloat("_DebugScale", debugDensityScale);
+            particleMaterial.SetFloat("_ParticleSize", particleSize);
+        }
+
         // GPU-driven render (zero CPU readback)
         var bounds = new Bounds(Vector3.zero,
             new Vector3(boundsSize.x + particleSize * 2f,
@@ -276,6 +322,9 @@ public class FluidSimGPU2D : MonoBehaviour
     // ── One simulation step (all substeps) ───────────────────────────────────
     void SimStep()
     {
+        // Re-apply all uniforms so Inspector tweaks take effect immediately
+        SetStaticUniforms();
+
         float dt = Mathf.Min(Time.deltaTime, 0.033f) / substeps;
 
         // Mouse input
@@ -327,6 +376,7 @@ public class FluidSimGPU2D : MonoBehaviour
         _cellParticles?.Release(); _cellParticles = null;
         _renderData?.Release();    _renderData    = null;
         _argsBuffer?.Release();    _argsBuffer    = null;
+        _queryBuffer?.Release();   _queryBuffer   = null;
         _initialized = false;
     }
 
@@ -379,10 +429,31 @@ public class FluidSimGPU2D : MonoBehaviour
     void OnGUI()
     {
         if (!_initialized) return;
-        GUI.Label(new Rect(10, 10, 300, 60),
-            $"GPU Fluid [{numParticles:N0} particles]\n" +
-            $"FPS: {1f / Time.smoothDeltaTime:F0}  " +
-            $"{(_paused ? "PAUSED" : "")}\n" +
-            $"Space=pause  RightArrow=step  R=reset");
+
+        var style = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+        GUI.Label(new Rect(10, 10, 400, 80),
+            $"GPU Fluid [{numParticles:N0} particles]  FPS: {1f / Time.smoothDeltaTime:F0}  " +
+            $"{(_paused ? "| PAUSED" : "")}\n" +
+            $"Space=pause  →=step  R=reset  Alt=density probe",
+            style);
+
+        // Density query tooltip near cursor
+        if (_queryActive)
+        {
+            float density    = _queryData[0];
+            float nearDensity = _queryData[1];
+            float pressure   = (density - targetDensity) * pressureMultiplier;
+
+            var screenPos = new Vector2(Input.mousePosition.x,
+                                        Screen.height - Input.mousePosition.y);
+            var rect = new Rect(screenPos.x + 14, screenPos.y - 10, 240, 70);
+
+            GUI.Box(rect, "");
+            GUI.Label(new Rect(rect.x + 4, rect.y + 2, rect.width - 8, rect.height - 4),
+                $"Density:      {density:F3}\n" +
+                $"Near Density: {nearDensity:F3}\n" +
+                $"Pressure:     {pressure:F2}",
+                style);
+        }
     }
 }

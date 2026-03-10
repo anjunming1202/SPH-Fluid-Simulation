@@ -11,6 +11,7 @@
 #pragma kernel ComputeForce
 #pragma kernel Integrate
 #pragma kernel BuildRenderData
+#pragma kernel QueryDensityAtPos
 
 // ── Buffers ─────────────────────────────────────────────────────────────────
 RWStructuredBuffer<float2> _Positions;
@@ -21,7 +22,8 @@ RWStructuredBuffer<float>  _NearDensities;
 RWStructuredBuffer<float2> _VelocityDelta;
 RWStructuredBuffer<uint>   _CellCount;      // [numCells]
 RWStructuredBuffer<uint>   _CellParticles;  // [numCells * MAX_PER_CELL]
-RWStructuredBuffer<float4> _RenderData;     // (pos.x, pos.y, speedSq, 0)
+RWStructuredBuffer<float4> _RenderData;     // (pos.x, pos.y, speedSq/density, 0)
+RWStructuredBuffer<float>  _QueryResult;    // [0]=density, [1]=nearDensity at query pos
 
 // ── Uniforms ─────────────────────────────────────────────────────────────────
 int   _NumParticles;
@@ -48,6 +50,9 @@ float2 _MouseWorld;
 float  _MouseSign;          // +1=attract, -1=repel, 0=inactive
 float  _InteractionRadius;
 float  _InteractionStrength;
+float  _MaxVelocity;        // velocity clamp (prevents boundary explosions)
+int    _DebugMode;          // 0=speed color, 1=density color
+float2 _QueryPos;           // world-space position to sample density at
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 int CellIndex(int cx, int cy)
@@ -79,8 +84,18 @@ void GravityPredict(uint3 id : SV_DispatchThreadID)
     uint i = id.x;
     float2 vel = _Velocities[i];
     vel.y += _Gravity * _DeltaTime;
+
+    // Clamp velocity to prevent runaway acceleration near boundaries
+    float speed = length(vel);
+    if (speed > _MaxVelocity) vel = (vel / speed) * _MaxVelocity;
+
     _Velocities[i] = vel;
-    _Predicted[i]  = _Positions[i] + vel * _DeltaTime;
+
+    // Clamp predicted to bounds so density kernel never sees particles
+    // piled outside the grid (the root cause of boundary pressure explosions)
+    float2 pred = _Positions[i] + vel * _DeltaTime;
+    pred = clamp(pred, _BoundsMin, _BoundsMax);
+    _Predicted[i] = pred;
 }
 
 // ── Kernel 3: BuildGrid ──────────────────────────────────────────────────────
@@ -260,9 +275,50 @@ void Integrate(uint3 id : SV_DispatchThreadID)
 void BuildRenderData(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint)_NumParticles) return;
-    uint   i      = id.x;
-    float2 pos    = _Positions[i];
-    float2 vel    = _Velocities[i];
-    float  speedSq = dot(vel, vel);
-    _RenderData[i] = float4(pos.x, pos.y, speedSq, 0.0);
+    uint   i   = id.x;
+    float2 pos = _Positions[i];
+    float2 vel = _Velocities[i];
+    // z: speedSq in normal mode, density in debug mode — shader uses same lerp logic
+    float  val = (_DebugMode == 1) ? _Densities[i] : dot(vel, vel);
+    _RenderData[i] = float4(pos.x, pos.y, val, 0.0);
+}
+
+// ── Kernel 8: QueryDensityAtPos ──────────────────────────────────────────────
+// Computes SPH density at an arbitrary world position (mouse cursor).
+// Run as single-thread: Dispatch(kernel, 1,1,1)
+// Output: _QueryResult[0]=density, _QueryResult[1]=nearDensity
+[numthreads(1, 1, 1)]
+void QueryDensityAtPos(uint3 id : SV_DispatchThreadID)
+{
+    float2 qp = _QueryPos;
+    float  h  = _SmoothingRadius;
+
+    int cx, cy;
+    WorldToCell(qp, cx, cy);
+
+    float density    = 0.0;
+    float nearDensity = 0.0;
+
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        int nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
+        int  cellIdx = CellIndex(nx, ny);
+        uint count   = min(_CellCount[cellIdx], (uint)_MaxPerCell);
+
+        for (uint s = 0; s < count; s++)
+        {
+            uint   j = _CellParticles[cellIdx * _MaxPerCell + s];
+            float2 d = qp - _Predicted[j];
+            float  r = length(d);
+            if (r >= h) continue;
+            float q = 1.0 - r / h;
+            density     += q * q;
+            nearDensity += q * q * q;
+        }
+    }
+
+    _QueryResult[0] = density;
+    _QueryResult[1] = nearDensity;
 }
