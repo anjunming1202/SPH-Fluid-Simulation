@@ -91,10 +91,12 @@ void GravityPredict(uint3 id : SV_DispatchThreadID)
 
     _Velocities[i] = vel;
 
-    // Clamp predicted to bounds so density kernel never sees particles
-    // piled outside the grid (the root cause of boundary pressure explosions)
+    // Clamp predicted slightly inside bounds (eps offset).
+    // This ensures the density kernel always sees the particle as having
+    // neighbours on ALL sides, so pressure never pushes it into the wall.
+    float  eps  = _SmoothingRadius * 0.1;
     float2 pred = _Positions[i] + vel * _DeltaTime;
-    pred = clamp(pred, _BoundsMin, _BoundsMax);
+    pred = clamp(pred, _BoundsMin + eps, _BoundsMax - eps);
     _Predicted[i] = pred;
 }
 
@@ -240,27 +242,33 @@ void Integrate(uint3 id : SV_DispatchThreadID)
 
     pos += vel * _DeltaTime;
 
-    // World bounds AABB
-    if (pos.x < _BoundsMin.x) { pos.x = _BoundsMin.x; vel.x =  abs(vel.x) * _CollisionDamping; }
-    if (pos.x > _BoundsMax.x) { pos.x = _BoundsMax.x; vel.x = -abs(vel.x) * _CollisionDamping; }
-    if (pos.y < _BoundsMin.y) { pos.y = _BoundsMin.y; vel.y =  abs(vel.y) * _CollisionDamping; }
-    if (pos.y > _BoundsMax.y) { pos.y = _BoundsMax.y; vel.y = -abs(vel.y) * _CollisionDamping; }
+    // World bounds AABB — place particle eps inside wall so it never sits
+    // exactly on the surface (prevents pressure-into-wall sticking).
+    float bEps = _SmoothingRadius * 0.1;
+    float2 bMin = _BoundsMin + bEps;
+    float2 bMax = _BoundsMax - bEps;
 
-    // Obstacle AABB
+    if (pos.x < bMin.x) { pos.x = bMin.x; vel.x =  abs(vel.x) * _CollisionDamping; }
+    if (pos.x > bMax.x) { pos.x = bMax.x; vel.x = -abs(vel.x) * _CollisionDamping; }
+    if (pos.y < bMin.y) { pos.y = bMin.y; vel.y =  abs(vel.y) * _CollisionDamping; }
+    if (pos.y > bMax.y) { pos.y = bMax.y; vel.y = -abs(vel.y) * _CollisionDamping; }
+
+    // Obstacle AABB — same eps trick to avoid sticking
     if (_ObstacleHalfSize.x > 0.0 && _ObstacleHalfSize.y > 0.0)
     {
-        float2 local = pos - _ObstacleCentre;
-        if (abs(local.x) < _ObstacleHalfSize.x && abs(local.y) < _ObstacleHalfSize.y)
+        float2 local   = pos - _ObstacleCentre;
+        float2 halfEps = _ObstacleHalfSize + bEps;
+        if (abs(local.x) < halfEps.x && abs(local.y) < halfEps.y)
         {
-            float2 overlap = _ObstacleHalfSize - abs(local);
+            float2 overlap = halfEps - abs(local);
             if (overlap.x < overlap.y)
             {
-                pos.x = _ObstacleCentre.x + sign(local.x) * _ObstacleHalfSize.x;
+                pos.x = _ObstacleCentre.x + sign(local.x) * halfEps.x;
                 vel.x = sign(local.x) * abs(vel.x) * _CollisionDamping;
             }
             else
             {
-                pos.y = _ObstacleCentre.y + sign(local.y) * _ObstacleHalfSize.y;
+                pos.y = _ObstacleCentre.y + sign(local.y) * halfEps.y;
                 vel.y = sign(local.y) * abs(vel.y) * _CollisionDamping;
             }
         }
