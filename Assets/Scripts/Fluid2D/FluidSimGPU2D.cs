@@ -98,6 +98,7 @@ public class FluidSimGPU2D : MonoBehaviour
     float[]       _queryData = new float[2];
     Vector2       _queryWorldPos;
     bool          _queryActive;
+    Material      _glMat;           // for GL circle overlay
 
     // ── Runtime state ─────────────────────────────────────────────────────────
     bool   _paused;
@@ -380,7 +381,69 @@ public class FluidSimGPU2D : MonoBehaviour
         _initialized = false;
     }
 
-    void OnDestroy() => ReleaseBuffers();
+    void OnDestroy()
+    {
+        ReleaseBuffers();
+        if (_glMat != null) Destroy(_glMat);
+    }
+
+    // ── GL circle overlay (Game View) ────────────────────────────────────────
+    void OnRenderObject()
+    {
+        if (!_queryActive || !_initialized) return;
+        if (Camera.current != _cam) return;     // only draw for main camera
+
+        if (_glMat == null)
+        {
+            _glMat = new Material(Shader.Find("Hidden/Internal-Colored"))
+                { hideFlags = HideFlags.HideAndDontSave };
+        }
+
+        _glMat.SetPass(0);
+        GL.PushMatrix();
+        GL.LoadIdentity();
+        GL.MultMatrix(_cam.worldToCameraMatrix);    // world → view space
+        GL.LoadProjectionMatrix(_cam.projectionMatrix);
+
+        const int Segments = 64;
+        float r = smoothingRadius;
+
+        // Filled soft disc using triangle fan (semi-transparent)
+        GL.Begin(GL.TRIANGLES);
+        GL.Color(new Color(1f, 1f, 0f, 0.06f));
+        for (int i = 0; i < Segments; i++)
+        {
+            float a0 = i       * Mathf.PI * 2f / Segments;
+            float a1 = (i + 1) * Mathf.PI * 2f / Segments;
+            GL.Vertex3(_queryWorldPos.x,                          _queryWorldPos.y,                          0f);
+            GL.Vertex3(_queryWorldPos.x + Mathf.Cos(a0) * r,     _queryWorldPos.y + Mathf.Sin(a0) * r,     0f);
+            GL.Vertex3(_queryWorldPos.x + Mathf.Cos(a1) * r,     _queryWorldPos.y + Mathf.Sin(a1) * r,     0f);
+        }
+        GL.End();
+
+        // Crisp outline ring
+        GL.Begin(GL.LINE_STRIP);
+        GL.Color(new Color(1f, 0.9f, 0f, 0.9f));
+        for (int i = 0; i <= Segments; i++)
+        {
+            float a = i * Mathf.PI * 2f / Segments;
+            GL.Vertex3(_queryWorldPos.x + Mathf.Cos(a) * r,
+                       _queryWorldPos.y + Mathf.Sin(a) * r, 0f);
+        }
+        GL.End();
+
+        // Small crosshair at centre
+        float ch = r * 0.12f;
+        GL.Begin(GL.LINES);
+        GL.Color(new Color(1f, 0.9f, 0f, 0.9f));
+        GL.Vertex3(_queryWorldPos.x - ch, _queryWorldPos.y,       0f);
+        GL.Vertex3(_queryWorldPos.x + ch, _queryWorldPos.y,       0f);
+        GL.Vertex3(_queryWorldPos.x,       _queryWorldPos.y - ch, 0f);
+        GL.Vertex3(_queryWorldPos.x,       _queryWorldPos.y + ch, 0f);
+        GL.End();
+
+        GL.PopMatrix();
+    }
 
     // ── Gizmos ────────────────────────────────────────────────────────────────
     void OnDrawGizmos()
