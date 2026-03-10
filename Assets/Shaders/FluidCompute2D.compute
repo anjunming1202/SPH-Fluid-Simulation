@@ -1,0 +1,268 @@
+// FluidCompute2D.compute
+// Phase 1 — Atomic Bucket Grid SPH (100k particles)
+// Kernel order per substep:
+//   ClearGrid -> GravityPredict -> BuildGrid -> ComputeDensity -> ComputeForce -> Integrate
+// Post-substep: BuildRenderData
+
+#pragma kernel ClearGrid
+#pragma kernel GravityPredict
+#pragma kernel BuildGrid
+#pragma kernel ComputeDensity
+#pragma kernel ComputeForce
+#pragma kernel Integrate
+#pragma kernel BuildRenderData
+
+// ── Buffers ─────────────────────────────────────────────────────────────────
+RWStructuredBuffer<float2> _Positions;
+RWStructuredBuffer<float2> _Velocities;
+RWStructuredBuffer<float2> _Predicted;
+RWStructuredBuffer<float>  _Densities;
+RWStructuredBuffer<float>  _NearDensities;
+RWStructuredBuffer<float2> _VelocityDelta;
+RWStructuredBuffer<uint>   _CellCount;      // [numCells]
+RWStructuredBuffer<uint>   _CellParticles;  // [numCells * MAX_PER_CELL]
+RWStructuredBuffer<float4> _RenderData;     // (pos.x, pos.y, speedSq, 0)
+
+// ── Uniforms ─────────────────────────────────────────────────────────────────
+int   _NumParticles;
+int   _NumCells;
+int   _GridW;
+int   _GridH;
+float _CellSize;
+float _SmoothingRadius;   // h
+float _TargetDensity;
+float _PressureMultiplier;
+float _NearPressureMultiplier;
+float _ViscosityStrength;
+float _Gravity;
+float _DeltaTime;
+float _CollisionDamping;
+int   _MaxPerCell;
+
+float2 _BoundsMin;
+float2 _BoundsMax;
+float2 _ObstacleCentre;
+float2 _ObstacleHalfSize;
+
+float2 _MouseWorld;
+float  _MouseSign;          // +1=attract, -1=repel, 0=inactive
+float  _InteractionRadius;
+float  _InteractionStrength;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+int CellIndex(int cx, int cy)
+{
+    return cy * _GridW + cx;
+}
+
+void WorldToCell(float2 p, out int cx, out int cy)
+{
+    cx = (int)floor((p.x - _BoundsMin.x) / _CellSize);
+    cy = (int)floor((p.y - _BoundsMin.y) / _CellSize);
+    cx = clamp(cx, 0, _GridW - 1);
+    cy = clamp(cy, 0, _GridH - 1);
+}
+
+// ── Kernel 1: ClearGrid ──────────────────────────────────────────────────────
+[numthreads(64, 1, 1)]
+void ClearGrid(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_NumCells) return;
+    _CellCount[id.x] = 0;
+}
+
+// ── Kernel 2: GravityPredict ─────────────────────────────────────────────────
+[numthreads(64, 1, 1)]
+void GravityPredict(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_NumParticles) return;
+    uint i = id.x;
+    float2 vel = _Velocities[i];
+    vel.y += _Gravity * _DeltaTime;
+    _Velocities[i] = vel;
+    _Predicted[i]  = _Positions[i] + vel * _DeltaTime;
+}
+
+// ── Kernel 3: BuildGrid ──────────────────────────────────────────────────────
+[numthreads(64, 1, 1)]
+void BuildGrid(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_NumParticles) return;
+    uint i = id.x;
+
+    int cx, cy;
+    WorldToCell(_Predicted[i], cx, cy);
+    int cellIdx = CellIndex(cx, cy);
+
+    uint slot;
+    InterlockedAdd(_CellCount[cellIdx], 1, slot);
+    if ((int)slot < _MaxPerCell)
+        _CellParticles[cellIdx * _MaxPerCell + (int)slot] = i;
+}
+
+// ── Kernel 4: ComputeDensity ─────────────────────────────────────────────────
+[numthreads(64, 1, 1)]
+void ComputeDensity(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_NumParticles) return;
+    uint i = id.x;
+
+    float2 pi = _Predicted[i];
+    float  h  = _SmoothingRadius;
+
+    int cx, cy;
+    WorldToCell(pi, cx, cy);
+
+    float density    = 0.0;
+    float nearDensity = 0.0;
+
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        int nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
+        int cellIdx = CellIndex(nx, ny);
+        uint count  = min(_CellCount[cellIdx], (uint)_MaxPerCell);
+
+        for (uint s = 0; s < count; s++)
+        {
+            uint   j = _CellParticles[cellIdx * _MaxPerCell + s];
+            float2 d = pi - _Predicted[j];
+            float  r = length(d);
+            if (r >= h) continue;
+            float q = 1.0 - r / h;
+            density     += q * q;
+            nearDensity += q * q * q;
+        }
+    }
+
+    _Densities[i]     = density;
+    _NearDensities[i] = nearDensity;
+}
+
+// ── Kernel 5: ComputeForce ───────────────────────────────────────────────────
+[numthreads(64, 1, 1)]
+void ComputeForce(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_NumParticles) return;
+    uint i = id.x;
+
+    float2 pi = _Predicted[i];
+    float2 vi = _Velocities[i];
+    float  h  = _SmoothingRadius;
+
+    float di  = _Densities[i];
+    float ndi = _NearDensities[i];
+    float pi_pressure  = (di  - _TargetDensity) * _PressureMultiplier;
+    float pi_nearPress = ndi * _NearPressureMultiplier;
+
+    int cx, cy;
+    WorldToCell(pi, cx, cy);
+
+    float2 force = float2(0.0, 0.0);
+
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        int nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
+        int cellIdx = CellIndex(nx, ny);
+        uint count  = min(_CellCount[cellIdx], (uint)_MaxPerCell);
+
+        for (uint s = 0; s < count; s++)
+        {
+            uint j = _CellParticles[cellIdx * _MaxPerCell + s];
+            if (j == i) continue;
+
+            float2 diff = pi - _Predicted[j];
+            float  r    = length(diff);
+            if (r >= h) continue;
+
+            float  q   = 1.0 - r / h;
+            float2 dir = (r > 1e-5) ? diff / r : float2(0.0, 1.0);
+
+            float dj  = _Densities[j];
+            float ndj = _NearDensities[j];
+            float pj_pressure  = (dj  - _TargetDensity) * _PressureMultiplier;
+            float pj_nearPress = ndj * _NearPressureMultiplier;
+
+            // Symmetric pressure + near-pressure
+            float sharedP  = (pi_pressure  + pj_pressure)  * 0.5;
+            float sharedNP = (pi_nearPress + pj_nearPress) * 0.5;
+            force += dir * (sharedP * q + sharedNP * q * q);
+
+            // Viscosity: smoothed velocity diffusion
+            float2 vj = _Velocities[j];
+            force += (vj - vi) * q * _ViscosityStrength;
+        }
+    }
+
+    _VelocityDelta[i] = force * _DeltaTime;
+}
+
+// ── Kernel 6: Integrate ──────────────────────────────────────────────────────
+[numthreads(64, 1, 1)]
+void Integrate(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_NumParticles) return;
+    uint i = id.x;
+
+    float2 vel = _Velocities[i] + _VelocityDelta[i];
+    float2 pos = _Positions[i];
+
+    // Mouse interaction
+    if (_MouseSign != 0.0)
+    {
+        float2 toMouse = _MouseWorld - pos;
+        float  dist    = length(toMouse);
+        if (dist < _InteractionRadius && dist > 0.001)
+        {
+            float  t        = 1.0 - dist / _InteractionRadius;
+            float  strength = t * _InteractionStrength;
+            vel += normalize(toMouse) * (_MouseSign * strength * _DeltaTime);
+        }
+    }
+
+    pos += vel * _DeltaTime;
+
+    // World bounds AABB
+    if (pos.x < _BoundsMin.x) { pos.x = _BoundsMin.x; vel.x =  abs(vel.x) * _CollisionDamping; }
+    if (pos.x > _BoundsMax.x) { pos.x = _BoundsMax.x; vel.x = -abs(vel.x) * _CollisionDamping; }
+    if (pos.y < _BoundsMin.y) { pos.y = _BoundsMin.y; vel.y =  abs(vel.y) * _CollisionDamping; }
+    if (pos.y > _BoundsMax.y) { pos.y = _BoundsMax.y; vel.y = -abs(vel.y) * _CollisionDamping; }
+
+    // Obstacle AABB
+    if (_ObstacleHalfSize.x > 0.0 && _ObstacleHalfSize.y > 0.0)
+    {
+        float2 local = pos - _ObstacleCentre;
+        if (abs(local.x) < _ObstacleHalfSize.x && abs(local.y) < _ObstacleHalfSize.y)
+        {
+            float2 overlap = _ObstacleHalfSize - abs(local);
+            if (overlap.x < overlap.y)
+            {
+                pos.x = _ObstacleCentre.x + sign(local.x) * _ObstacleHalfSize.x;
+                vel.x = sign(local.x) * abs(vel.x) * _CollisionDamping;
+            }
+            else
+            {
+                pos.y = _ObstacleCentre.y + sign(local.y) * _ObstacleHalfSize.y;
+                vel.y = sign(local.y) * abs(vel.y) * _CollisionDamping;
+            }
+        }
+    }
+
+    _Positions[i]  = pos;
+    _Velocities[i] = vel;
+}
+
+// ── Kernel 7: BuildRenderData ────────────────────────────────────────────────
+[numthreads(64, 1, 1)]
+void BuildRenderData(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_NumParticles) return;
+    uint   i      = id.x;
+    float2 pos    = _Positions[i];
+    float2 vel    = _Velocities[i];
+    float  speedSq = dot(vel, vel);
+    _RenderData[i] = float4(pos.x, pos.y, speedSq, 0.0);
+}
