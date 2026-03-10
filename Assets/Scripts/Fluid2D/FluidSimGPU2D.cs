@@ -199,24 +199,22 @@ public class FluidSimGPU2D : MonoBehaviour
         var pos = new Vector2[numParticles];
         var vel = new Vector2[numParticles];
 
-        int   cols    = Mathf.CeilToInt(Mathf.Sqrt(numParticles));
-        float spacing = smoothingRadius * 0.85f;
-        // Spawn in upper-center of bounds
-        float startX = -cols * spacing * 0.5f;
-        float startY = boundsSize.y * 0.25f;
+        float spacing = smoothingRadius * 0.9f;
+        float bEps    = smoothingRadius * 0.15f;
 
-        float hx = boundsSize.x * 0.5f - 0.05f;
-        float hy = boundsSize.y * 0.5f - 0.05f;
+        // Fit columns within bounds width — no particle ever gets clamped
+        int cols = Mathf.Max(1, Mathf.FloorToInt((boundsSize.x - bEps * 2f) / spacing));
+
+        // Start from top of bounds, stack downward
+        float startX = -(cols - 1) * spacing * 0.5f;
+        float startY =  boundsSize.y * 0.5f - bEps - spacing * 0.5f;
 
         for (int i = 0; i < numParticles; i++)
         {
-            int col = i % cols;
-            int row = i / cols;
-            float x = startX + col * spacing;
-            float y = startY - row * spacing;
-            pos[i] = new Vector2(
-                Mathf.Clamp(x, -hx, hx),
-                Mathf.Clamp(y, -hy, hy));
+            int   col = i % cols;
+            int   row = i / cols;
+            pos[i] = new Vector2(startX + col * spacing,
+                                  startY - row * spacing);
             vel[i] = Vector2.zero;
         }
 

@@ -94,7 +94,7 @@ void GravityPredict(uint3 id : SV_DispatchThreadID)
     // Clamp predicted slightly inside bounds (eps offset).
     // This ensures the density kernel always sees the particle as having
     // neighbours on ALL sides, so pressure never pushes it into the wall.
-    float  eps  = _SmoothingRadius * 0.1;
+    float  eps  = _SmoothingRadius * 0.15;
     float2 pred = _Positions[i] + vel * _DeltaTime;
     pred = clamp(pred, _BoundsMin + eps, _BoundsMax - eps);
     _Predicted[i] = pred;
@@ -196,7 +196,16 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
             if (r >= h) continue;
 
             float  q   = 1.0 - r / h;
-            float2 dir = (r > 1e-5) ? diff / r : float2(0.0, 1.0);
+            // Degenerate case: use a deterministic per-pair direction so
+            // overlapping particles spread in all directions, not just up.
+            float2 dir;
+            if (r > 1e-5)
+                dir = diff / r;
+            else {
+                uint h2 = i * 2654435761u ^ j * 2246822519u;
+                float angle = (float)(h2 & 0xFFFFu) * (6.28318 / 65536.0);
+                dir = float2(cos(angle), sin(angle));
+            }
 
             float dj  = _Densities[j];
             float ndj = _NearDensities[j];
