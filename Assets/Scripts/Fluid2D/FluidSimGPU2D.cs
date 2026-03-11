@@ -25,6 +25,8 @@ public class FluidSimGPU2D : MonoBehaviour
     [Range(1, 5)]
     public int substeps = 3;
 
+    public float maxDt = 0.01f;
+
     public float gravity              = -9.8f;
     public float smoothingRadius      = 0.2f;
     public float targetDensity        = 2.75f;
@@ -328,7 +330,7 @@ public class FluidSimGPU2D : MonoBehaviour
         // Re-apply all uniforms so Inspector tweaks take effect immediately
         SetStaticUniforms();
 
-        float dt = Mathf.Min(Time.deltaTime, 0.033f) / substeps;
+        float dt = Mathf.Min(Time.deltaTime, maxDt) / substeps;
 
         // Mouse input
         float  mouseSign  = 0f;

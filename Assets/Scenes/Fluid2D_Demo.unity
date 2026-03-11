@@ -245,7 +245,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   particleMaterial: {fileID: 2100000, guid: c79cdac0189233f45a60d87197624098, type: 2}
-  particleRadius: 0.08
+  particleRadius: 0.05
   colorBySpeed: 1
   maxSpeed: 10
 --- !u!114 &1580568825
@@ -264,16 +264,16 @@ MonoBehaviour:
   smoothingRadius: 0.2
   iterationsPerFrame: 3
   gravity: -9.81
-  targetDensity: 0.04
-  pressureMultiplier: 40
+  targetDensity: 3
+  pressureMultiplier: 50
   nearPressureMultiplier: 0.81
-  viscosityStrength: 0.06
-  boundsSize: {x: 16, y: 9}
+  viscosityStrength: 80
+  boundsSize: {x: 15, y: 9}
   collisionDamping: 0.4
   obstacleCentre: {x: 0, y: 0}
   obstacleSize: {x: 2, y: 2}
   interactionRadius: 1.2
-  interactionStrength: 10
+  interactionStrength: 200
 --- !u!4 &1580568826
 Transform:
   m_ObjectHideFlags: 0

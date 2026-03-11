@@ -151,23 +151,28 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cfdf322cb0f49ec45931c6e36c108e1d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  numParticles: 50000
+  numParticles: 100000
   substeps: 2
-  gravity: -9.8
-  smoothingRadius: 0.2
-  targetDensity: 2.75
-  pressureMultiplier: 80
-  nearPressureMultiplier: 15
-  viscosityStrength: 0.1
+  maxDt: 0.005
+  gravity: -9.15
+  smoothingRadius: 0.05
+  targetDensity: 3
+  pressureMultiplier: 30
+  nearPressureMultiplier: 8
+  viscosityStrength: 40
   collisionDamping: 0.4
-  boundsSize: {x: 16, y: 9}
-  obstacleCentre: {x: 0, y: 0}
-  obstacleSize: {x: 0, y: 0}
+  maxVelocity: 40
+  linearDrag: 0.5
+  boundsSize: {x: 13, y: 9}
+  obstacleCentre: {x: 4.69, y: 0.7}
+  obstacleSize: {x: 0.19, y: 9.8}
   interactionRadius: 1.5
-  interactionStrength: 5
+  interactionStrength: 50
   particleMesh: {fileID: 0}
   particleMaterial: {fileID: 0}
-  particleSize: 0.09
+  particleSize: 0.05
+  debugDensityColor: 0
+  debugDensityScale: 10
   computeShader: {fileID: 7200000, guid: fb0cc9f9f68df084495725ed07575035, type: 3}
 --- !u!4 &702809166
 Transform:

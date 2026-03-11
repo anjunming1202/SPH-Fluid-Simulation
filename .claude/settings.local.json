@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__ai-game-developer__scene-get-data",
+      "Bash(find \"E:/Unity Projects/Claude Fluid Simulation\" -type f -name \"README*\" -o -name \"CLAUDE.md\" -o -name \".cursorrules\" -o -name \"copilot-instructions.md\" 2>/dev/null | head -20)",
+      "Bash(find \"E:/Unity Projects/Claude Fluid Simulation\" -maxdepth 2 -type f \\\\\\( -name \"*.md\" -o -name \"*.txt\" -o -name \".cursorrules\" -o -name \"CLAUDE.md\" \\\\\\) 2>/dev/null | grep -v Library | grep -v Temp | grep -v Package)",
+      "mcp__ai-game-developer__assets-create-folder",
+      "mcp__ai-game-developer__console-get-logs",
+      "mcp__ai-game-developer__assets-refresh",
+      "mcp__ai-game-developer__script-read",
+      "mcp__ai-game-developer__scene-create",
+      "mcp__ai-game-developer__script-execute",
+      "mcp__ai-game-developer__scene-list-opened"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "ai-game-developer"
+  ]
+}
