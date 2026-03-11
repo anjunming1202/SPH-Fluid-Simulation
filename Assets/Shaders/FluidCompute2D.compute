@@ -50,10 +50,8 @@ float2 _MouseWorld;
 float  _MouseSign;          // +1=attract, -1=repel, 0=inactive
 float  _InteractionRadius;
 float  _InteractionStrength;
-float  _MaxVelocity;        // velocity clamp (prevents boundary explosions)
-float  _LinearDrag;         // per-second velocity decay (0=off, ~0.5 typical)
-float  _TaitGamma;          // Tait exponent (2-7). Higher = stiffer near rest, softer far from rest
-float  _CohesionPressure;   // max magnitude of negative pressure (suction). 0=no surface tension, ~10=water-like
+float  _MaxVelocity;        // emergency speed cap (large safety net, not primary stability mechanism)
+float  _CohesionPressure;   // max suction magnitude. 0=no surface tension, ~10=water-like
 int    _DebugMode;          // 0=speed color, 1=density color
 float2 _QueryPos;           // world-space position to sample density at
 
@@ -88,7 +86,6 @@ void GravityPredict(uint3 id : SV_DispatchThreadID)
     float2 vel = _Velocities[i];
     vel.y += _Gravity * _DeltaTime;
 
-    // Clamp velocity to prevent runaway acceleration near boundaries
     float speed = length(vel);
     if (speed > _MaxVelocity) vel = (vel / speed) * _MaxVelocity;
 
@@ -173,14 +170,10 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
 
     float di  = _Densities[i];
     float ndi = _NearDensities[i];
-    // Tait equation: P = B * ((ρ/ρ₀)^γ - 1)
-    // Vs linear P = (ρ-ρ₀)*B: Tait is gentler at small deviations and
-    // grows faster only when severely compressed, giving a natural pressure
-    // ceiling that resists explosion without needing a hard clamp.
-    float ri  = di  / max(_TargetDensity, 0.001);
-    // Bounded negative pressure: allows controlled suction (surface tension) but caps it
-    // so tensile instability cascade (suction -> cluster -> spike -> explosion) can't run away.
-    float pi_pressure  = max(-_CohesionPressure, _PressureMultiplier * (pow(ri, _TaitGamma) - 1.0));
+    // Linear pressure: P = B * (ρ - ρ₀).
+    // Suction (ρ < ρ₀) is bounded by _CohesionPressure to prevent tensile instability
+    // while still giving particles cohesion (surface tension).
+    float pi_pressure  = max(-_CohesionPressure, _PressureMultiplier * (di - _TargetDensity));
     float pi_nearPress = ndi * _NearPressureMultiplier;
 
     int cx, cy;
@@ -219,8 +212,7 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
 
             float dj  = _Densities[j];
             float ndj = _NearDensities[j];
-            float rj  = dj / max(_TargetDensity, 0.001);
-            float pj_pressure  = max(-_CohesionPressure, _PressureMultiplier * (pow(rj, _TaitGamma) - 1.0));
+            float pj_pressure  = max(-_CohesionPressure, _PressureMultiplier * (dj - _TargetDensity));
             float pj_nearPress = ndj * _NearPressureMultiplier;
 
             // Symmetric pressure + near-pressure
@@ -246,15 +238,10 @@ void Integrate(uint3 id : SV_DispatchThreadID)
 
     float2 vel = _Velocities[i] + _VelocityDelta[i];
 
-    // Clamp right after adding force — prevents single-substep explosions
-    // (GravityPredict clamps too, but the force delta can push beyond limit
-    //  in the same substep before the next clamp fires).
+    // Emergency speed cap — CFL-based dt (computed in C#) is the real stability
+    // mechanism; this clamp only catches extreme edge cases.
     float spd = length(vel);
     if (spd > _MaxVelocity) vel = (vel / spd) * _MaxVelocity;
-
-    // Linear drag: dissipates oscillation energy at the bottom without
-    // noticeably slowing normal fluid flow (keep _LinearDrag <= 1.0).
-    vel *= max(0.0, 1.0 - _LinearDrag * _DeltaTime);
 
     float2 pos = _Positions[i];
 

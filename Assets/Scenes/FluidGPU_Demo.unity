@@ -158,13 +158,11 @@ MonoBehaviour:
   smoothingRadius: 0.05
   targetDensity: 3
   pressureMultiplier: 80
-  taitGamma: 2
   cohesionPressure: 10
   nearPressureMultiplier: 8
   viscosityStrength: 40
   collisionDamping: 0.4
-  maxVelocity: 40
-  linearDrag: 0.5
+  maxVelocity: 200
   boundsSize: {x: 13, y: 9}
   obstacleCentre: {x: 4.69, y: 0.7}
   obstacleSize: {x: 0.19, y: 9.8}

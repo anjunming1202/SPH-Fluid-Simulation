@@ -33,11 +33,7 @@ public class FluidSimGPU2D : MonoBehaviour
 
     public float pressureMultiplier   = 80f;
 
-    [Tooltip("Tait exponent γ. 2=stable. Higher amplifies over-compression; keep ≤4.")]
-    [Range(1f, 7f)]
-    public float taitGamma            = 2f;
-
-    [Tooltip("Max suction force at low density (surface tension). 0=powder, ~10=water droplets, >20=jelly. Too high → explosions.")]
+    [Tooltip("Max suction at low density (surface tension). 0=powder, ~10=water, >20=jelly.")]
     public float cohesionPressure     = 10f;
 
     public float nearPressureMultiplier = 15f;
@@ -48,11 +44,8 @@ public class FluidSimGPU2D : MonoBehaviour
     [Range(0f, 1f)]
     public float collisionDamping     = 0.4f;
 
-    [Tooltip("Hard speed cap — prevents boundary explosion from pressure runaway")]
-    public float maxVelocity          = 40f;
-
-    [Tooltip("Per-second velocity decay. Dissipates bottom oscillations. 0=off, 0.5=light, 2=heavy")]
-    public float linearDrag           = 0.5f;
+    [Tooltip("Emergency speed cap. CFL-adaptive dt is the real stability mechanism; this only catches extremes.")]
+    public float maxVelocity          = 200f;
 
     // ── World ────────────────────────────────────────────────────────────────
     [Header("World")]
@@ -268,7 +261,6 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_SmoothingRadius",       smoothingRadius);
         computeShader.SetFloat ("_TargetDensity",         targetDensity);
         computeShader.SetFloat ("_PressureMultiplier",    pressureMultiplier);
-        computeShader.SetFloat ("_TaitGamma",             taitGamma);
         computeShader.SetFloat ("_CohesionPressure",      cohesionPressure);
         computeShader.SetFloat ("_NearPressureMultiplier",nearPressureMultiplier);
         computeShader.SetFloat ("_ViscosityStrength",     viscosityStrength);
@@ -278,7 +270,6 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_InteractionRadius",     interactionRadius);
         computeShader.SetFloat ("_InteractionStrength",   interactionStrength);
         computeShader.SetFloat ("_MaxVelocity",           maxVelocity);
-        computeShader.SetFloat ("_LinearDrag",            linearDrag);
         computeShader.SetInt   ("_DebugMode",             debugDensityColor ? 1 : 0);
 
         Vector2 bMin = -boundsSize * 0.5f;
@@ -338,7 +329,14 @@ public class FluidSimGPU2D : MonoBehaviour
         // Re-apply all uniforms so Inspector tweaks take effect immediately
         SetStaticUniforms();
 
-        float dt = Mathf.Min(Time.deltaTime, maxDt) / substeps;
+        // CFL-adaptive dt: pressure wave speed c_s = sqrt(B/ρ₀).
+        // dt must stay below 0.4*h/c_s so a particle can't travel more than
+        // ~0.4 smoothing radii per step due to pressure alone.
+        // This automatically tightens when pressureMultiplier is raised,
+        // preventing explosions without needing manual dt tuning.
+        float cs   = Mathf.Sqrt(pressureMultiplier / Mathf.Max(targetDensity, 0.01f));
+        float dtCFL = 0.4f * smoothingRadius / cs;
+        float dt   = Mathf.Min(Mathf.Min(Time.deltaTime, maxDt) / substeps, dtCFL);
 
         // Mouse input
         float  mouseSign  = 0f;
