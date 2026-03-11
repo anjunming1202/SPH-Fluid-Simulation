@@ -1,12 +1,14 @@
 // FluidCompute2D.compute
-// Phase 1 — Atomic Bucket Grid SPH (100k particles)
+// Phase 2 — Bitonic Sort Grid SPH (500k particles)
 // Kernel order per substep:
-//   ClearGrid -> GravityPredict -> BuildGrid -> ComputeDensity -> ComputeForce -> Integrate
+//   ClearCellStarts -> GravityPredict -> ComputeKeys -> [BitonicSort.compute] -> CalcCellStarts
+//   -> ComputeDensity -> ComputeForce -> Integrate
 // Post-substep: BuildRenderData
 
-#pragma kernel ClearGrid
+#pragma kernel ClearCellStarts
 #pragma kernel GravityPredict
-#pragma kernel BuildGrid
+#pragma kernel ComputeKeys
+#pragma kernel CalcCellStarts
 #pragma kernel ComputeDensity
 #pragma kernel ComputeForce
 #pragma kernel Integrate
@@ -20,8 +22,10 @@ RWStructuredBuffer<float2> _Predicted;
 RWStructuredBuffer<float>  _Densities;
 RWStructuredBuffer<float>  _NearDensities;
 RWStructuredBuffer<float2> _VelocityDelta;
-RWStructuredBuffer<uint>   _CellCount;      // [numCells]
-RWStructuredBuffer<uint>   _CellParticles;  // [numCells * MAX_PER_CELL]
+RWStructuredBuffer<uint>   _SortKeys;       // [paddedN] particle→cell key (sorted)
+RWStructuredBuffer<uint>   _SortIndices;    // [paddedN] particle IDs reordered by sort
+RWStructuredBuffer<uint>   _CellStart;      // [numCells] first index in sorted array
+RWStructuredBuffer<uint>   _CellEnd;        // [numCells] one-past-last index
 RWStructuredBuffer<float4> _RenderData;     // (pos.x, pos.y, speedSq/density, 0)
 RWStructuredBuffer<float>  _QueryResult;    // [0]=density, [1]=nearDensity at query pos
 
@@ -52,6 +56,7 @@ float  _InteractionRadius;
 float  _InteractionStrength;
 float  _MaxVelocity;        // emergency speed cap (large safety net, not primary stability mechanism)
 float  _CohesionPressure;   // max suction magnitude. 0=no surface tension, ~10=water-like
+int    _SortN;              // paddedN = next power of 2 >= numParticles
 int    _DebugMode;          // 0=speed color, 1=density color
 float2 _QueryPos;           // world-space position to sample density at
 
@@ -69,12 +74,13 @@ void WorldToCell(float2 p, out int cx, out int cy)
     cy = clamp(cy, 0, _GridH - 1);
 }
 
-// ── Kernel 1: ClearGrid ──────────────────────────────────────────────────────
+// ── Kernel 1: ClearCellStarts ────────────────────────────────────────────────
 [numthreads(64, 1, 1)]
-void ClearGrid(uint3 id : SV_DispatchThreadID)
+void ClearCellStarts(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint)_NumCells) return;
-    _CellCount[id.x] = 0;
+    _CellStart[id.x] = 0x7FFFFFFF;  // sentinel: cell has no particles
+    _CellEnd[id.x]   = 0;
 }
 
 // ── Kernel 2: GravityPredict ─────────────────────────────────────────────────
@@ -100,24 +106,47 @@ void GravityPredict(uint3 id : SV_DispatchThreadID)
     _Predicted[i] = pred;
 }
 
-// ── Kernel 3: BuildGrid ──────────────────────────────────────────────────────
+// ── Kernel 3: ComputeKeys ────────────────────────────────────────────────────
+// Assigns each particle a cell key. Padding entries [numParticles..paddedN-1]
+// get sentinel key 0x7FFFFFFF so they sort to the end and are ignored.
 [numthreads(64, 1, 1)]
-void BuildGrid(uint3 id : SV_DispatchThreadID)
+void ComputeKeys(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x >= (uint)_NumParticles) return;
     uint i = id.x;
+    if (i >= (uint)_SortN) return;
+
+    if (i >= (uint)_NumParticles)
+    {
+        _SortKeys[i]    = 0x7FFFFFFF;
+        _SortIndices[i] = 0;
+        return;
+    }
 
     int cx, cy;
     WorldToCell(_Predicted[i], cx, cy);
-    int cellIdx = CellIndex(cx, cy);
-
-    uint slot;
-    InterlockedAdd(_CellCount[cellIdx], 1, slot);
-    if ((int)slot < _MaxPerCell)
-        _CellParticles[cellIdx * _MaxPerCell + (int)slot] = i;
+    _SortKeys[i]    = (uint)CellIndex(cx, cy);
+    _SortIndices[i] = i;
 }
 
-// ── Kernel 4: ComputeDensity ─────────────────────────────────────────────────
+// ── Kernel 4: CalcCellStarts ─────────────────────────────────────────────────
+// Scans sorted _SortKeys to find where each cell's run begins and ends.
+// Run after BitonicSort; dispatch over [numParticles] threads (not paddedN).
+[numthreads(64, 1, 1)]
+void CalcCellStarts(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= (uint)_NumParticles) return;
+
+    uint key = _SortKeys[i];
+    if (key >= (uint)_NumCells) return;   // sentinel — skip padding
+
+    if (i == 0 || _SortKeys[i - 1] != key)
+        _CellStart[key] = i;
+    if (i == (uint)(_NumParticles - 1) || _SortKeys[i + 1] != key)
+        _CellEnd[key] = i + 1;
+}
+
+// ── Kernel 5: ComputeDensity ─────────────────────────────────────────────────
 [numthreads(64, 1, 1)]
 void ComputeDensity(uint3 id : SV_DispatchThreadID)
 {
@@ -138,12 +167,14 @@ void ComputeDensity(uint3 id : SV_DispatchThreadID)
     {
         int nx = cx + dx, ny = cy + dy;
         if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
-        int cellIdx = CellIndex(nx, ny);
-        uint count  = min(_CellCount[cellIdx], (uint)_MaxPerCell);
+        int  cellIdx = CellIndex(nx, ny);
+        uint start   = _CellStart[cellIdx];
+        if (start == 0x7FFFFFFF) continue;   // empty cell
+        uint end = _CellEnd[cellIdx];
 
-        for (uint s = 0; s < count; s++)
+        for (uint s = start; s < end; s++)
         {
-            uint   j = _CellParticles[cellIdx * _MaxPerCell + s];
+            uint   j = _SortIndices[s];
             float2 d = pi - _Predicted[j];
             float  r = length(d);
             if (r >= h) continue;
@@ -157,7 +188,7 @@ void ComputeDensity(uint3 id : SV_DispatchThreadID)
     _NearDensities[i] = nearDensity;
 }
 
-// ── Kernel 5: ComputeForce ───────────────────────────────────────────────────
+// ── Kernel 6: ComputeForce ───────────────────────────────────────────────────
 [numthreads(64, 1, 1)]
 void ComputeForce(uint3 id : SV_DispatchThreadID)
 {
@@ -186,12 +217,14 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
     {
         int nx = cx + dx, ny = cy + dy;
         if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
-        int cellIdx = CellIndex(nx, ny);
-        uint count  = min(_CellCount[cellIdx], (uint)_MaxPerCell);
+        int  cellIdx = CellIndex(nx, ny);
+        uint start   = _CellStart[cellIdx];
+        if (start == 0x7FFFFFFF) continue;   // empty cell
+        uint end = _CellEnd[cellIdx];
 
-        for (uint s = 0; s < count; s++)
+        for (uint s = start; s < end; s++)
         {
-            uint j = _CellParticles[cellIdx * _MaxPerCell + s];
+            uint j = _SortIndices[s];
             if (j == i) continue;
 
             float2 diff = pi - _Predicted[j];
@@ -331,11 +364,13 @@ void QueryDensityAtPos(uint3 id : SV_DispatchThreadID)
         int nx = cx + dx, ny = cy + dy;
         if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
         int  cellIdx = CellIndex(nx, ny);
-        uint count   = min(_CellCount[cellIdx], (uint)_MaxPerCell);
+        uint start   = _CellStart[cellIdx];
+        if (start == 0x7FFFFFFF) continue;
+        uint end = _CellEnd[cellIdx];
 
-        for (uint s = 0; s < count; s++)
+        for (uint s = start; s < end; s++)
         {
-            uint   j = _CellParticles[cellIdx * _MaxPerCell + s];
+            uint   j = _SortIndices[s];
             float2 d = qp - _Predicted[j];
             float  r = length(d);
             if (r >= h) continue;

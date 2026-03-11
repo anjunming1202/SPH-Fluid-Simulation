@@ -1,0 +1,42 @@
+// BitonicSort.compute
+// Sorts (sortKeys, sortIndices) pairs in ascending key order.
+// Padding entries must be pre-filled with key = 0x7FFFFFFF (they sort to the end).
+//
+// Dispatch pattern (from C# for each step of the outer two loops):
+//   for k = 2, 4, ..., paddedN:
+//     for j = k/2, k/4, ..., 1:
+//       SetInt("_StepJ", j); SetInt("_StepK", k);
+//       Dispatch(BitonicStep, paddedN/256, 1, 1)
+
+#pragma kernel BitonicStep
+
+RWStructuredBuffer<uint> _SortKeys;
+RWStructuredBuffer<uint> _SortIndices;
+
+int _StepJ;   // XOR mask for compare partner: ixj = i ^ _StepJ
+int _StepK;   // block size: determines ascending vs descending half
+int _SortN;   // padded array size (next power of 2 >= numParticles)
+
+[numthreads(256, 1, 1)]
+void BitonicStep(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= (uint)_SortN) return;
+
+    uint ixj = i ^ (uint)_StepJ;
+    if (ixj <= i) return;   // process each pair exactly once
+
+    bool ascending = (i & (uint)_StepK) == 0;
+    bool needsSwap = (_SortKeys[i] > _SortKeys[ixj]) == ascending;
+
+    if (needsSwap)
+    {
+        uint tmpK = _SortKeys[i];
+        _SortKeys[i]    = _SortKeys[ixj];
+        _SortKeys[ixj]  = tmpK;
+
+        uint tmpI = _SortIndices[i];
+        _SortIndices[i]   = _SortIndices[ixj];
+        _SortIndices[ixj] = tmpI;
+    }
+}

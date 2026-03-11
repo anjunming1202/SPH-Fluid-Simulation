@@ -3,8 +3,8 @@
 // All particle data lives in ComputeBuffers — no CPU readback.
 // Rendering: DrawMeshInstancedIndirect reads _RenderData directly on GPU.
 //
-// Phase 1: Atomic bucket grid (InterlockedAdd). Targets 100k particles.
-// Phase 2/3 (Bitonic/Radix sort) will be added in later updates.
+// Phase 2: Bitonic Sort grid. Targets 500k particles.
+//   Sorted particle array replaces atomic bucket; no MAX_PER_CELL limit.
 //
 // Setup:
 //   1. Assign computeShader -> FluidCompute2D.compute
@@ -76,26 +76,29 @@ public class FluidSimGPU2D : MonoBehaviour
     [Tooltip("Density value that maps to full red in density color mode")]
     public float debugDensityScale = 10f;
 
-    // ── Compute shader (required) ────────────────────────────────────────────
+    // ── Compute shaders (required) ───────────────────────────────────────────
     [Header("References")]
     public ComputeShader computeShader;
+    public ComputeShader bitonicShader;
 
     // ── ComputeBuffers ───────────────────────────────────────────────────────
     ComputeBuffer _positions, _velocities, _predicted;
     ComputeBuffer _densities, _nearDensities, _velocityDelta;
-    ComputeBuffer _cellCount, _cellParticles;
+    ComputeBuffer _sortKeys, _sortIndices;  // [paddedN] sorted by cell key
+    ComputeBuffer _cellStart, _cellEnd;     // [numCells] index range per cell
     ComputeBuffer _renderData;
     ComputeBuffer _argsBuffer;
 
     // ── Grid ─────────────────────────────────────────────────────────────────
     int   _gridW, _gridH, _numCells;
     float _cellSize;
-    const int MAX_PER_CELL = 128;
+    int   _paddedN;  // next power of 2 >= numParticles (for Bitonic Sort)
 
     // ── Kernel IDs ────────────────────────────────────────────────────────────
-    int _kClearGrid, _kGravityPredict, _kBuildGrid;
+    int _kClearCellStarts, _kGravityPredict, _kComputeKeys, _kCalcCellStarts;
     int _kComputeDensity, _kComputeForce, _kIntegrate, _kBuildRenderData;
     int _kQueryDensityAtPos;
+    int _kBitonicStep;
 
     // ── Debug query ───────────────────────────────────────────────────────────
     ComputeBuffer _queryBuffer;     // [0]=density [1]=nearDensity
@@ -147,16 +150,19 @@ public class FluidSimGPU2D : MonoBehaviour
         _numCells = _gridW * _gridH;
 
         // Allocate GPU buffers
-        _positions      = new ComputeBuffer(numParticles,             2 * sizeof(float));
-        _velocities     = new ComputeBuffer(numParticles,             2 * sizeof(float));
-        _predicted      = new ComputeBuffer(numParticles,             2 * sizeof(float));
-        _densities      = new ComputeBuffer(numParticles,                 sizeof(float));
-        _nearDensities  = new ComputeBuffer(numParticles,                 sizeof(float));
-        _velocityDelta  = new ComputeBuffer(numParticles,             2 * sizeof(float));
-        _cellCount      = new ComputeBuffer(_numCells,                    sizeof(uint));
-        _cellParticles  = new ComputeBuffer(_numCells * MAX_PER_CELL,     sizeof(uint));
-        _renderData     = new ComputeBuffer(numParticles,             4 * sizeof(float));
-        _queryBuffer    = new ComputeBuffer(2,                            sizeof(float));
+        _paddedN        = Mathf.NextPowerOfTwo(numParticles);
+        _positions      = new ComputeBuffer(numParticles, 2 * sizeof(float));
+        _velocities     = new ComputeBuffer(numParticles, 2 * sizeof(float));
+        _predicted      = new ComputeBuffer(numParticles, 2 * sizeof(float));
+        _densities      = new ComputeBuffer(numParticles,     sizeof(float));
+        _nearDensities  = new ComputeBuffer(numParticles,     sizeof(float));
+        _velocityDelta  = new ComputeBuffer(numParticles, 2 * sizeof(float));
+        _sortKeys       = new ComputeBuffer(_paddedN,         sizeof(uint));
+        _sortIndices    = new ComputeBuffer(_paddedN,         sizeof(uint));
+        _cellStart      = new ComputeBuffer(_numCells,        sizeof(uint));
+        _cellEnd        = new ComputeBuffer(_numCells,        sizeof(uint));
+        _renderData     = new ComputeBuffer(numParticles, 4 * sizeof(float));
+        _queryBuffer    = new ComputeBuffer(2,                sizeof(float));
 
         // Indirect args: indexCount, instanceCount, startIndex, baseVertex, startInstance
         _argsBuffer = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
@@ -168,15 +174,29 @@ public class FluidSimGPU2D : MonoBehaviour
         args[4] = 0u;
         _argsBuffer.SetData(args);
 
-        // Kernel IDs
-        _kClearGrid          = computeShader.FindKernel("ClearGrid");
+        // Kernel IDs — FluidCompute2D.compute
+        _kClearCellStarts    = computeShader.FindKernel("ClearCellStarts");
         _kGravityPredict     = computeShader.FindKernel("GravityPredict");
-        _kBuildGrid          = computeShader.FindKernel("BuildGrid");
+        _kComputeKeys        = computeShader.FindKernel("ComputeKeys");
+        _kCalcCellStarts     = computeShader.FindKernel("CalcCellStarts");
         _kComputeDensity     = computeShader.FindKernel("ComputeDensity");
         _kComputeForce       = computeShader.FindKernel("ComputeForce");
         _kIntegrate          = computeShader.FindKernel("Integrate");
         _kBuildRenderData    = computeShader.FindKernel("BuildRenderData");
         _kQueryDensityAtPos  = computeShader.FindKernel("QueryDensityAtPos");
+
+        // BitonicSort.compute
+        if (bitonicShader != null)
+        {
+            _kBitonicStep = bitonicShader.FindKernel("BitonicStep");
+            bitonicShader.SetInt("_SortN", _paddedN);
+            bitonicShader.SetBuffer(_kBitonicStep, "_SortKeys",    _sortKeys);
+            bitonicShader.SetBuffer(_kBitonicStep, "_SortIndices", _sortIndices);
+        }
+        else
+        {
+            Debug.LogError("[FluidSimGPU2D] bitonicShader not assigned! Assign BitonicSort.compute in the Inspector.");
+        }
 
         // Spawn particles in a grid
         SpawnParticles();
@@ -194,7 +214,7 @@ public class FluidSimGPU2D : MonoBehaviour
 
         _initialized = true;
         /*_paused      = false;*/
-        Debug.Log($"[FluidSimGPU2D] Initialized: {numParticles} particles, grid {_gridW}×{_gridH} ({_numCells} cells)");
+        Debug.Log($"[FluidSimGPU2D] Initialized: {numParticles} particles (paddedN={_paddedN}), grid {_gridW}×{_gridH} ({_numCells} cells), bitonicDispatches={BitonicDispatchCount(_paddedN)}");
     }
 
     // ── Particle spawn ────────────────────────────────────────────────────────
@@ -230,7 +250,7 @@ public class FluidSimGPU2D : MonoBehaviour
     void BindBuffers()
     {
         int[] kernels = {
-            _kClearGrid, _kGravityPredict, _kBuildGrid,
+            _kClearCellStarts, _kGravityPredict, _kComputeKeys, _kCalcCellStarts,
             _kComputeDensity, _kComputeForce, _kIntegrate,
             _kBuildRenderData, _kQueryDensityAtPos
         };
@@ -243,8 +263,10 @@ public class FluidSimGPU2D : MonoBehaviour
             computeShader.SetBuffer(k, "_Densities",     _densities);
             computeShader.SetBuffer(k, "_NearDensities", _nearDensities);
             computeShader.SetBuffer(k, "_VelocityDelta", _velocityDelta);
-            computeShader.SetBuffer(k, "_CellCount",     _cellCount);
-            computeShader.SetBuffer(k, "_CellParticles", _cellParticles);
+            computeShader.SetBuffer(k, "_SortKeys",      _sortKeys);
+            computeShader.SetBuffer(k, "_SortIndices",   _sortIndices);
+            computeShader.SetBuffer(k, "_CellStart",     _cellStart);
+            computeShader.SetBuffer(k, "_CellEnd",       _cellEnd);
             computeShader.SetBuffer(k, "_RenderData",    _renderData);
             computeShader.SetBuffer(k, "_QueryResult",   _queryBuffer);
         }
@@ -266,7 +288,7 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_ViscosityStrength",     viscosityStrength);
         computeShader.SetFloat ("_Gravity",               gravity);
         computeShader.SetFloat ("_CollisionDamping",      collisionDamping);
-        computeShader.SetInt   ("_MaxPerCell",            MAX_PER_CELL);
+        computeShader.SetInt   ("_SortN",                 _paddedN);
         computeShader.SetFloat ("_InteractionRadius",     interactionRadius);
         computeShader.SetFloat ("_InteractionStrength",   interactionStrength);
         computeShader.SetFloat ("_MaxVelocity",           maxVelocity);
@@ -356,15 +378,34 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloats("_MouseWorld", mouseWorld.x, mouseWorld.y);
 
         int pGroups = Mathf.CeilToInt((float)numParticles / 64f);
+        int kGroups = Mathf.CeilToInt((float)_paddedN     / 64f);  // ComputeKeys
         int cGroups = Mathf.CeilToInt((float)_numCells    / 64f);
+        int bGroups = Mathf.CeilToInt((float)_paddedN     / 256f); // BitonicStep
 
         for (int s = 0; s < substeps; s++)
         {
             computeShader.SetFloat("_DeltaTime", dt);
 
-            computeShader.Dispatch(_kClearGrid,       cGroups, 1, 1);
+            // 1. Reset cell ranges
+            computeShader.Dispatch(_kClearCellStarts, cGroups, 1, 1);
+            // 2. Gravity + predicted positions
             computeShader.Dispatch(_kGravityPredict,  pGroups, 1, 1);
-            computeShader.Dispatch(_kBuildGrid,       pGroups, 1, 1);
+            // 3. Assign cell key to each particle (fills _SortKeys/_SortIndices)
+            computeShader.Dispatch(_kComputeKeys,     kGroups, 1, 1);
+            // 4. Sort particles by cell key
+            if (bitonicShader != null)
+            {
+                for (int k = 2; k <= _paddedN; k <<= 1)
+                    for (int j = k >> 1; j > 0; j >>= 1)
+                    {
+                        bitonicShader.SetInt("_StepJ", j);
+                        bitonicShader.SetInt("_StepK", k);
+                        bitonicShader.Dispatch(_kBitonicStep, bGroups, 1, 1);
+                    }
+            }
+            // 5. Find each cell's run in the sorted array
+            computeShader.Dispatch(_kCalcCellStarts,  pGroups, 1, 1);
+            // 6. SPH density → force → integrate
             computeShader.Dispatch(_kComputeDensity,  pGroups, 1, 1);
             computeShader.Dispatch(_kComputeForce,    pGroups, 1, 1);
             computeShader.Dispatch(_kIntegrate,       pGroups, 1, 1);
@@ -383,8 +424,10 @@ public class FluidSimGPU2D : MonoBehaviour
         _densities?.Release();     _densities     = null;
         _nearDensities?.Release(); _nearDensities = null;
         _velocityDelta?.Release(); _velocityDelta = null;
-        _cellCount?.Release();     _cellCount     = null;
-        _cellParticles?.Release(); _cellParticles = null;
+        _sortKeys?.Release();      _sortKeys      = null;
+        _sortIndices?.Release();   _sortIndices   = null;
+        _cellStart?.Release();     _cellStart     = null;
+        _cellEnd?.Release();       _cellEnd       = null;
         _renderData?.Release();    _renderData    = null;
         _argsBuffer?.Release();    _argsBuffer    = null;
         _queryBuffer?.Release();   _queryBuffer   = null;
@@ -478,6 +521,15 @@ public class FluidSimGPU2D : MonoBehaviour
     }
 
     // ── Utilities ─────────────────────────────────────────────────────────────
+    static int BitonicDispatchCount(int n)
+    {
+        int count = 0;
+        for (int k = 2; k <= n; k <<= 1)
+            for (int j = k >> 1; j > 0; j >>= 1)
+                count++;
+        return count;
+    }
+
     static Mesh CreateQuadMesh()
     {
         var mesh = new Mesh { name = "ParticleQuad" };
