@@ -29,6 +29,9 @@ public class FluidSimGPU2D : MonoBehaviour
 
     public float gravity              = -9.8f;
     public float smoothingRadius      = 0.2f;
+
+    [Tooltip("When true, targetDensity is auto-computed from particle count and bounds so the simulation stays stable regardless of numParticles or boundsSize.")]
+    public bool  autoRestDensity      = true;
     public float targetDensity        = 2.75f;
 
     public float pressureMultiplier   = 80f;
@@ -149,6 +152,16 @@ public class FluidSimGPU2D : MonoBehaviour
         _gridH    = Mathf.CeilToInt(boundsSize.y / _cellSize) + 2;
         _numCells = _gridW * _gridH;
 
+        // Auto rest-density: derived from q² kernel integral over uniform distribution.
+        // ρ_rest = N × π × h² / (3 × area) — keeps pressure near-zero at equilibrium
+        // regardless of particle count, bounds size, or smoothing radius.
+        if (autoRestDensity)
+        {
+            float area = boundsSize.x * boundsSize.y;
+            targetDensity = numParticles * Mathf.PI * smoothingRadius * smoothingRadius / (3f * area);
+            Debug.Log($"[FluidSimGPU2D] autoRestDensity → targetDensity = {targetDensity:F4} (N={numParticles}, h={smoothingRadius}, area={area:F1})");
+        }
+
         // Allocate GPU buffers
         _paddedN        = Mathf.NextPowerOfTwo(numParticles);
         _positions      = new ComputeBuffer(numParticles, 2 * sizeof(float));
@@ -214,7 +227,7 @@ public class FluidSimGPU2D : MonoBehaviour
 
         _initialized = true;
         /*_paused      = false;*/
-        Debug.Log($"[FluidSimGPU2D] Initialized: {numParticles} particles (paddedN={_paddedN}), grid {_gridW}×{_gridH} ({_numCells} cells), bitonicDispatches={BitonicDispatchCount(_paddedN)}");
+        Debug.Log($"[FluidSimGPU2D] Initialized: {numParticles} particles (paddedN={_paddedN}), grid {_gridW}×{_gridH} ({_numCells} cells), targetDensity={targetDensity:F4}, bitonicDispatches={BitonicDispatchCount(_paddedN)}");
     }
 
     // ── Particle spawn ────────────────────────────────────────────────────────
@@ -556,9 +569,10 @@ public class FluidSimGPU2D : MonoBehaviour
         if (!_initialized) return;
 
         var style = new GUIStyle(GUI.skin.label) { fontSize = 14 };
-        GUI.Label(new Rect(10, 10, 400, 80),
+        GUI.Label(new Rect(10, 10, 500, 100),
             $"GPU Fluid [{numParticles:N0} particles]  FPS: {1f / Time.smoothDeltaTime:F0}  " +
             $"{(_paused ? "| PAUSED" : "")}\n" +
+            $"ρ₀={targetDensity:F3}  h={smoothingRadius:F4}  P={pressureMultiplier}  substeps={substeps}\n" +
             $"Space=pause  →=step  R=reset  Alt=density probe",
             style);
 
