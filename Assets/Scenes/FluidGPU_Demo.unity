@@ -159,6 +159,7 @@ MonoBehaviour:
   targetDensity: 3
   pressureMultiplier: 80
   taitGamma: 2
+  cohesionPressure: 10
   nearPressureMultiplier: 8
   viscosityStrength: 40
   collisionDamping: 0.4

@@ -53,6 +53,7 @@ float  _InteractionStrength;
 float  _MaxVelocity;        // velocity clamp (prevents boundary explosions)
 float  _LinearDrag;         // per-second velocity decay (0=off, ~0.5 typical)
 float  _TaitGamma;          // Tait exponent (2-7). Higher = stiffer near rest, softer far from rest
+float  _CohesionPressure;   // max magnitude of negative pressure (suction). 0=no surface tension, ~10=water-like
 int    _DebugMode;          // 0=speed color, 1=density color
 float2 _QueryPos;           // world-space position to sample density at
 
@@ -177,10 +178,9 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
     // grows faster only when severely compressed, giving a natural pressure
     // ceiling that resists explosion without needing a hard clamp.
     float ri  = di  / max(_TargetDensity, 0.001);
-    // max(0,...) clamps tensile instability: negative pressure (suction) causes
-    // particle clustering -> density spike -> explosion cascade. Removing suction
-    // breaks the positive feedback loop while near-pressure still handles short-range repulsion.
-    float pi_pressure  = max(0.0, _PressureMultiplier * (pow(ri, _TaitGamma) - 1.0));
+    // Bounded negative pressure: allows controlled suction (surface tension) but caps it
+    // so tensile instability cascade (suction -> cluster -> spike -> explosion) can't run away.
+    float pi_pressure  = max(-_CohesionPressure, _PressureMultiplier * (pow(ri, _TaitGamma) - 1.0));
     float pi_nearPress = ndi * _NearPressureMultiplier;
 
     int cx, cy;
@@ -220,7 +220,7 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
             float dj  = _Densities[j];
             float ndj = _NearDensities[j];
             float rj  = dj / max(_TargetDensity, 0.001);
-            float pj_pressure  = max(0.0, _PressureMultiplier * (pow(rj, _TaitGamma) - 1.0));
+            float pj_pressure  = max(-_CohesionPressure, _PressureMultiplier * (pow(rj, _TaitGamma) - 1.0));
             float pj_nearPress = ndj * _NearPressureMultiplier;
 
             // Symmetric pressure + near-pressure

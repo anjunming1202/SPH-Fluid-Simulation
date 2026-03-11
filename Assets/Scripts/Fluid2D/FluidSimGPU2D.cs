@@ -31,12 +31,14 @@ public class FluidSimGPU2D : MonoBehaviour
     public float smoothingRadius      = 0.2f;
     public float targetDensity        = 2.75f;
 
-    [Tooltip("Tait bulk modulus B. Negative pressure is clamped to 0 (no suction), so this controls repulsion strength only.")]
     public float pressureMultiplier   = 80f;
 
-    [Tooltip("Tait exponent γ. 2=stable with clamped pressure. Higher amplifies over-compression; keep ≤4.")]
+    [Tooltip("Tait exponent γ. 2=stable. Higher amplifies over-compression; keep ≤4.")]
     [Range(1f, 7f)]
     public float taitGamma            = 2f;
+
+    [Tooltip("Max suction force at low density (surface tension). 0=powder, ~10=water droplets, >20=jelly. Too high → explosions.")]
+    public float cohesionPressure     = 10f;
 
     public float nearPressureMultiplier = 15f;
 
@@ -267,6 +269,7 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_TargetDensity",         targetDensity);
         computeShader.SetFloat ("_PressureMultiplier",    pressureMultiplier);
         computeShader.SetFloat ("_TaitGamma",             taitGamma);
+        computeShader.SetFloat ("_CohesionPressure",      cohesionPressure);
         computeShader.SetFloat ("_NearPressureMultiplier",nearPressureMultiplier);
         computeShader.SetFloat ("_ViscosityStrength",     viscosityStrength);
         computeShader.SetFloat ("_Gravity",               gravity);
