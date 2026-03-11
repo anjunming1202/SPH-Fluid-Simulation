@@ -31,12 +31,12 @@ public class FluidSimGPU2D : MonoBehaviour
     public float smoothingRadius      = 0.2f;
     public float targetDensity        = 2.75f;
 
-    [Tooltip("Tait bulk modulus B. With Tait, tune to ~pressureMultiplier*targetDensity/gamma")]
-    public float pressureMultiplier   = 30f;
+    [Tooltip("Tait bulk modulus B. Negative pressure is clamped to 0 (no suction), so this controls repulsion strength only.")]
+    public float pressureMultiplier   = 80f;
 
-    [Tooltip("Tait exponent γ. 1=linear(old), 2=quadratic, 4=recommended, 7=water-accurate")]
+    [Tooltip("Tait exponent γ. 2=stable with clamped pressure. Higher amplifies over-compression; keep ≤4.")]
     [Range(1f, 7f)]
-    public float taitGamma            = 4f;
+    public float taitGamma            = 2f;
 
     public float nearPressureMultiplier = 15f;
 

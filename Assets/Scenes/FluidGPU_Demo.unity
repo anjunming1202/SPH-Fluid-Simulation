@@ -157,7 +157,8 @@ MonoBehaviour:
   gravity: -9.15
   smoothingRadius: 0.05
   targetDensity: 3
-  pressureMultiplier: 30
+  pressureMultiplier: 80
+  taitGamma: 2
   nearPressureMultiplier: 8
   viscosityStrength: 40
   collisionDamping: 0.4

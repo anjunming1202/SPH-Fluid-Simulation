@@ -177,7 +177,10 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
     // grows faster only when severely compressed, giving a natural pressure
     // ceiling that resists explosion without needing a hard clamp.
     float ri  = di  / max(_TargetDensity, 0.001);
-    float pi_pressure  = _PressureMultiplier * (pow(ri, _TaitGamma) - 1.0);
+    // max(0,...) clamps tensile instability: negative pressure (suction) causes
+    // particle clustering -> density spike -> explosion cascade. Removing suction
+    // breaks the positive feedback loop while near-pressure still handles short-range repulsion.
+    float pi_pressure  = max(0.0, _PressureMultiplier * (pow(ri, _TaitGamma) - 1.0));
     float pi_nearPress = ndi * _NearPressureMultiplier;
 
     int cx, cy;
@@ -217,7 +220,7 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
             float dj  = _Densities[j];
             float ndj = _NearDensities[j];
             float rj  = dj / max(_TargetDensity, 0.001);
-            float pj_pressure  = _PressureMultiplier * (pow(rj, _TaitGamma) - 1.0);
+            float pj_pressure  = max(0.0, _PressureMultiplier * (pow(rj, _TaitGamma) - 1.0));
             float pj_nearPress = ndj * _NearPressureMultiplier;
 
             // Symmetric pressure + near-pressure
