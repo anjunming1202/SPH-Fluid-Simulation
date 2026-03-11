@@ -52,6 +52,7 @@ float  _InteractionRadius;
 float  _InteractionStrength;
 float  _MaxVelocity;        // velocity clamp (prevents boundary explosions)
 float  _LinearDrag;         // per-second velocity decay (0=off, ~0.5 typical)
+float  _TaitGamma;          // Tait exponent (2-7). Higher = stiffer near rest, softer far from rest
 int    _DebugMode;          // 0=speed color, 1=density color
 float2 _QueryPos;           // world-space position to sample density at
 
@@ -171,7 +172,12 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
 
     float di  = _Densities[i];
     float ndi = _NearDensities[i];
-    float pi_pressure  = (di  - _TargetDensity) * _PressureMultiplier;
+    // Tait equation: P = B * ((ρ/ρ₀)^γ - 1)
+    // Vs linear P = (ρ-ρ₀)*B: Tait is gentler at small deviations and
+    // grows faster only when severely compressed, giving a natural pressure
+    // ceiling that resists explosion without needing a hard clamp.
+    float ri  = di  / max(_TargetDensity, 0.001);
+    float pi_pressure  = _PressureMultiplier * (pow(ri, _TaitGamma) - 1.0);
     float pi_nearPress = ndi * _NearPressureMultiplier;
 
     int cx, cy;
@@ -210,7 +216,8 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
 
             float dj  = _Densities[j];
             float ndj = _NearDensities[j];
-            float pj_pressure  = (dj  - _TargetDensity) * _PressureMultiplier;
+            float rj  = dj / max(_TargetDensity, 0.001);
+            float pj_pressure  = _PressureMultiplier * (pow(rj, _TaitGamma) - 1.0);
             float pj_nearPress = ndj * _NearPressureMultiplier;
 
             // Symmetric pressure + near-pressure

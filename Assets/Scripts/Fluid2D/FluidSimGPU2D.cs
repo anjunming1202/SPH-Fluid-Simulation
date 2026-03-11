@@ -31,8 +31,12 @@ public class FluidSimGPU2D : MonoBehaviour
     public float smoothingRadius      = 0.2f;
     public float targetDensity        = 2.75f;
 
-    [Tooltip("Higher = stiffer fluid, risk of explosion")]
-    public float pressureMultiplier   = 80f;
+    [Tooltip("Tait bulk modulus B. With Tait, tune to ~pressureMultiplier*targetDensity/gamma")]
+    public float pressureMultiplier   = 30f;
+
+    [Tooltip("Tait exponent γ. 1=linear(old), 2=quadratic, 4=recommended, 7=water-accurate")]
+    [Range(1f, 7f)]
+    public float taitGamma            = 4f;
 
     public float nearPressureMultiplier = 15f;
 
@@ -262,6 +266,7 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_SmoothingRadius",       smoothingRadius);
         computeShader.SetFloat ("_TargetDensity",         targetDensity);
         computeShader.SetFloat ("_PressureMultiplier",    pressureMultiplier);
+        computeShader.SetFloat ("_TaitGamma",             taitGamma);
         computeShader.SetFloat ("_NearPressureMultiplier",nearPressureMultiplier);
         computeShader.SetFloat ("_ViscosityStrength",     viscosityStrength);
         computeShader.SetFloat ("_Gravity",               gravity);
