@@ -159,7 +159,7 @@ MonoBehaviour:
   targetDensity: 3
   pressureMultiplier: 80
   cohesionPressure: 10
-  nearPressureMultiplier: 8
+  nearPressureMultiplier: 18
   viscosityStrength: 40
   collisionDamping: 0.4
   maxVelocity: 200

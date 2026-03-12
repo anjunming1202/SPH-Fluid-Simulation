@@ -297,7 +297,11 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_TargetDensity",         targetDensity);
         computeShader.SetFloat ("_PressureMultiplier",    pressureMultiplier);
         computeShader.SetFloat ("_CohesionPressure",      cohesionPressure);
-        computeShader.SetFloat ("_NearPressureMultiplier",nearPressureMultiplier);
+        // Normalize near-pressure by targetDensity so near-repulsion force at
+        // equilibrium equals (nearPressureMultiplier × 0.6) regardless of N or h.
+        // Without this, nearDensity ∝ N at same h → near-pressure explodes at 500k.
+        computeShader.SetFloat ("_NearPressureMultiplier",
+            nearPressureMultiplier / Mathf.Max(targetDensity, 0.001f));
         computeShader.SetFloat ("_ViscosityStrength",     viscosityStrength);
         computeShader.SetFloat ("_Gravity",               gravity);
         computeShader.SetFloat ("_CollisionDamping",      collisionDamping);
