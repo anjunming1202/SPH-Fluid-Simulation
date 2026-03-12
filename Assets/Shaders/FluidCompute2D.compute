@@ -57,6 +57,9 @@ float  _InteractionStrength;
 float  _MaxVelocity;        // emergency speed cap (large safety net, not primary stability mechanism)
 float  _CohesionPressure;   // max suction magnitude. 0=no surface tension, ~10=water-like
 float  _MaxDensityRatio;    // clamp density to this × targetDensity before pressure (explosion limiter)
+float  _WallFriction;       // velocity damping rate near walls (world units⁻¹). ~200 default
+float  _BPSpacing;          // Akinci boundary particle spacing (= h/2 typically)
+float  _BPVolume;           // Akinci volume ψ_b = targetDensity / (2 × Σ_k W(k·d_bp))
 int    _SortN;              // paddedN = next power of 2 >= numParticles
 int    _DebugMode;          // 0=speed color, 1=density color
 float2 _QueryPos;           // world-space position to sample density at
@@ -187,6 +190,65 @@ void ComputeDensity(uint3 id : SV_DispatchThreadID)
         }
     }
 
+    // ── Akinci 2012 Boundary Particles ────────────────────────────────────────
+    // Boundary particles are sampled analytically at _BPSpacing along each flat wall.
+    // _BPVolume = targetDensity / (2 × Σ_k W(k·bpS)) ensures a floor particle at d=0
+    // receives exactly the missing half-density, achieving kernel completeness.
+    // No separate GPU buffer: positions are computed on-the-fly (flat walls only).
+    {
+        float bpS = _BPSpacing;
+        float bpV = _BPVolume;
+
+        // Bottom wall — BPs at y = _BoundsMin.y, along x
+        float dB = max(0.0, pi.y - _BoundsMin.y);
+        if (dB < h) {
+            int k0 = max(0, (int)floor((pi.x - _BoundsMin.x - h) / bpS));
+            int k1 = (int)ceil((pi.x - _BoundsMin.x + h) / bpS);
+            for (int k = k0; k <= k1; k++) {
+                float bx = _BoundsMin.x + k * bpS;
+                if (bx > _BoundsMax.x) break;
+                float r = length(float2(pi.x - bx, dB));
+                if (r < h) { float q=1.0-r/h; density+=bpV*q*q*q*q*(1.0+4.0*(r/h)); nearDensity+=bpV*q*q*q; }
+            }
+        }
+        // Top wall — BPs at y = _BoundsMax.y, along x
+        float dT = max(0.0, _BoundsMax.y - pi.y);
+        if (dT < h) {
+            int k0 = max(0, (int)floor((pi.x - _BoundsMin.x - h) / bpS));
+            int k1 = (int)ceil((pi.x - _BoundsMin.x + h) / bpS);
+            for (int k = k0; k <= k1; k++) {
+                float bx = _BoundsMin.x + k * bpS;
+                if (bx > _BoundsMax.x) break;
+                float r = length(float2(pi.x - bx, dT));
+                if (r < h) { float q=1.0-r/h; density+=bpV*q*q*q*q*(1.0+4.0*(r/h)); nearDensity+=bpV*q*q*q; }
+            }
+        }
+        // Left wall — BPs at x = _BoundsMin.x, along y
+        float dL = max(0.0, pi.x - _BoundsMin.x);
+        if (dL < h) {
+            int k0 = max(0, (int)floor((pi.y - _BoundsMin.y - h) / bpS));
+            int k1 = (int)ceil((pi.y - _BoundsMin.y + h) / bpS);
+            for (int k = k0; k <= k1; k++) {
+                float by = _BoundsMin.y + k * bpS;
+                if (by > _BoundsMax.y) break;
+                float r = length(float2(dL, pi.y - by));
+                if (r < h) { float q=1.0-r/h; density+=bpV*q*q*q*q*(1.0+4.0*(r/h)); nearDensity+=bpV*q*q*q; }
+            }
+        }
+        // Right wall — BPs at x = _BoundsMax.x, along y
+        float dR = max(0.0, _BoundsMax.x - pi.x);
+        if (dR < h) {
+            int k0 = max(0, (int)floor((pi.y - _BoundsMin.y - h) / bpS));
+            int k1 = (int)ceil((pi.y - _BoundsMin.y + h) / bpS);
+            for (int k = k0; k <= k1; k++) {
+                float by = _BoundsMin.y + k * bpS;
+                if (by > _BoundsMax.y) break;
+                float r = length(float2(dR, pi.y - by));
+                if (r < h) { float q=1.0-r/h; density+=bpV*q*q*q*q*(1.0+4.0*(r/h)); nearDensity+=bpV*q*q*q; }
+            }
+        }
+    }
+
     _Densities[i]     = density;
     _NearDensities[i] = nearDensity;
 }
@@ -209,10 +271,14 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
     // this breaks strict conservation but prevents single-frame explosions.
     float di_c  = min(di,  _TargetDensity * _MaxDensityRatio);
     float ndi_c = min(ndi, _TargetDensity * _MaxDensityRatio);
-    // Linear pressure: P = B * (ρ - ρ₀).
-    // Suction (ρ < ρ₀) is bounded by _CohesionPressure to prevent tensile instability
-    // while still giving particles cohesion (surface tension).
-    float pi_pressure  = max(-_CohesionPressure, _PressureMultiplier * (di_c - _TargetDensity));
+    // Near walls, suppress cohesion (tensile attraction) to prevent boundary clustering.
+    // Boundary particles have lower effective density → negative pressure → cohesion
+    // pulls them into a dense line (tensile instability). Setting cohesion=0 near walls
+    // breaks this feedback loop while leaving interior surface-tension intact.
+    float minWallDist = min(min(pi.x - _BoundsMin.x, _BoundsMax.x - pi.x),
+                            min(pi.y - _BoundsMin.y, _BoundsMax.y - pi.y));
+    float effCohesion = (minWallDist < h) ? 0.0 : _CohesionPressure;
+    float pi_pressure  = max(-effCohesion, _PressureMultiplier * (di_c - _TargetDensity));
     float pi_nearPress = ndi_c * _NearPressureMultiplier;
 
     int cx, cy;
@@ -269,6 +335,85 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
         }
     }
 
+    // ── Akinci 2012 Boundary Particle Forces ─────────────────────────────────
+    // Boundary particles are stationary (v_b=0) with density≈targetDensity (p_b≈0).
+    // Pressure: symmetric = (pi_pressure + 0)/2, clamped repulsion-only.
+    // Viscosity: (v_b - v_i)×q×vis = -v_i×q×vis → no-slip wall condition.
+    {
+        float bpS = _BPSpacing;
+        float bpV = _BPVolume;
+        float wallP = max(0.0, pi_pressure);  // walls can only push, not pull
+
+        // Bottom wall
+        float dB = max(0.0, pi.y - _BoundsMin.y);
+        if (dB < h) {
+            int k0 = max(0, (int)floor((pi.x - _BoundsMin.x - h) / bpS));
+            int k1 = (int)ceil((pi.x - _BoundsMin.x + h) / bpS);
+            for (int k = k0; k <= k1; k++) {
+                float bx = _BoundsMin.x + k * bpS;
+                if (bx > _BoundsMax.x) break;
+                float2 diff = float2(pi.x - bx, dB);
+                float r = length(diff);
+                if (r > 1e-5 && r < h) {
+                    float q = 1.0 - r/h; float2 dir = diff/r;
+                    force += dir * bpV * (wallP*0.5*q + pi_nearPress*0.5*q*q);
+                    force -= vi * (q * _ViscosityStrength * bpV);
+                }
+            }
+        }
+        // Top wall
+        float dT = max(0.0, _BoundsMax.y - pi.y);
+        if (dT < h) {
+            int k0 = max(0, (int)floor((pi.x - _BoundsMin.x - h) / bpS));
+            int k1 = (int)ceil((pi.x - _BoundsMin.x + h) / bpS);
+            for (int k = k0; k <= k1; k++) {
+                float bx = _BoundsMin.x + k * bpS;
+                if (bx > _BoundsMax.x) break;
+                float2 diff = float2(pi.x - bx, -dT);
+                float r = length(diff);
+                if (r > 1e-5 && r < h) {
+                    float q = 1.0 - r/h; float2 dir = diff/r;
+                    force += dir * bpV * (wallP*0.5*q + pi_nearPress*0.5*q*q);
+                    force -= vi * (q * _ViscosityStrength * bpV);
+                }
+            }
+        }
+        // Left wall
+        float dL = max(0.0, pi.x - _BoundsMin.x);
+        if (dL < h) {
+            int k0 = max(0, (int)floor((pi.y - _BoundsMin.y - h) / bpS));
+            int k1 = (int)ceil((pi.y - _BoundsMin.y + h) / bpS);
+            for (int k = k0; k <= k1; k++) {
+                float by = _BoundsMin.y + k * bpS;
+                if (by > _BoundsMax.y) break;
+                float2 diff = float2(dL, pi.y - by);
+                float r = length(diff);
+                if (r > 1e-5 && r < h) {
+                    float q = 1.0 - r/h; float2 dir = diff/r;
+                    force += dir * bpV * (wallP*0.5*q + pi_nearPress*0.5*q*q);
+                    force -= vi * (q * _ViscosityStrength * bpV);
+                }
+            }
+        }
+        // Right wall
+        float dR = max(0.0, _BoundsMax.x - pi.x);
+        if (dR < h) {
+            int k0 = max(0, (int)floor((pi.y - _BoundsMin.y - h) / bpS));
+            int k1 = (int)ceil((pi.y - _BoundsMin.y + h) / bpS);
+            for (int k = k0; k <= k1; k++) {
+                float by = _BoundsMin.y + k * bpS;
+                if (by > _BoundsMax.y) break;
+                float2 diff = float2(-dR, pi.y - by);
+                float r = length(diff);
+                if (r > 1e-5 && r < h) {
+                    float q = 1.0 - r/h; float2 dir = diff/r;
+                    force += dir * bpV * (wallP*0.5*q + pi_nearPress*0.5*q*q);
+                    force -= vi * (q * _ViscosityStrength * bpV);
+                }
+            }
+        }
+    }
+
     _VelocityDelta[i] = force * _DeltaTime;
 }
 
@@ -313,6 +458,19 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     if (pos.x > bMax.x) { pos.x = bMax.x; vel.x = -abs(vel.x) * _CollisionDamping; }
     if (pos.y < bMin.y) { pos.y = bMin.y; vel.y =  abs(vel.y) * _CollisionDamping; }
     if (pos.y > bMax.y) { pos.y = bMax.y; vel.y = -abs(vel.y) * _CollisionDamping; }
+
+    // Wall viscous drag — damp the velocity component toward a wall when within h.
+    // This dissipates the oscillation energy that collision damping alone cannot remove,
+    // since pure elastic reflection + gravity creates a sustained resonance.
+    // Wall viscous drag: damp velocity component directed toward each wall.
+    // Linearly stronger as particle approaches wall surface.
+    // _WallFriction (units: 1/time) controls how aggressively oscillation is absorbed.
+    float wh = _SmoothingRadius;
+    float wallDrag = _WallFriction * _DeltaTime;
+    float dBL = pos.x - _BoundsMin.x;  if (dBL < wh && vel.x < 0.0) vel.x *= max(0.0, 1.0 - wallDrag * (1.0 - dBL/wh));
+    float dBR = _BoundsMax.x - pos.x;  if (dBR < wh && vel.x > 0.0) vel.x *= max(0.0, 1.0 - wallDrag * (1.0 - dBR/wh));
+    float dBB = pos.y - _BoundsMin.y;  if (dBB < wh && vel.y < 0.0) vel.y *= max(0.0, 1.0 - wallDrag * (1.0 - dBB/wh));
+    float dBT = _BoundsMax.y - pos.y;  if (dBT < wh && vel.y > 0.0) vel.y *= max(0.0, 1.0 - wallDrag * (1.0 - dBT/wh));
 
     // Obstacle AABB — same eps trick to avoid sticking
     if (_ObstacleHalfSize.x > 0.0 && _ObstacleHalfSize.y > 0.0)

@@ -59,6 +59,10 @@ public class FluidSimGPU2D : MonoBehaviour
              "Limits runaway forces from transient particle overlaps. 3-5 is typical; higher = less clamping.")]
     public float maxDensityRatio      = 4f;
 
+    [Tooltip("Extra velocity damping (1/s) for particles near walls, on top of Akinci BP viscosity. " +
+             "0 = rely solely on Akinci no-slip. 50-200 = additional suppression for stubborn oscillation.")]
+    public float wallFriction         = 0f;
+
     // ── World ────────────────────────────────────────────────────────────────
     [Header("World")]
     public Vector2 boundsSize      = new Vector2(16f, 9f);
@@ -107,6 +111,10 @@ public class FluidSimGPU2D : MonoBehaviour
     // Counting sort buffers
     ComputeBuffer _cellCount, _cellWritePtr, _tileSums;
 
+    // ── Akinci boundary particles ─────────────────────────────────────────────
+    float _bpSpacing;   // boundary particle spacing (h/2)
+    float _bpVolume;    // Akinci volume ψ_b, calibrated once in Init()
+
     // ── Grid ─────────────────────────────────────────────────────────────────
     int   _gridW, _gridH, _numCells;
     float _cellSize;
@@ -135,9 +143,10 @@ public class FluidSimGPU2D : MonoBehaviour
     Material      _glMat;           // for GL circle overlay
 
     // ── Runtime state ─────────────────────────────────────────────────────────
-    bool   _paused;
-    bool   _initialized;
-    Camera _cam;
+    bool    _paused;
+    bool    _initialized;
+    Camera  _cam;
+    Vector2 _lastBoundsSize;   // detect runtime boundsSize change → re-init grid
 
     // ─────────────────────────────────────────────────────────────────────────
     void Start()
@@ -189,6 +198,22 @@ public class FluidSimGPU2D : MonoBehaviour
             targetDensity = numParticles * Mathf.PI * smoothingRadius * smoothingRadius / (3.5f * area);
             Debug.Log($"[FluidSimGPU2D] autoRestDensity (Wendland) → targetDensity = {targetDensity:F4} (N={numParticles}, h={smoothingRadius}, area={area:F1})");
         }
+
+        // Akinci boundary particle calibration.
+        // _bpSpacing = h/2: gives ~4 BPs per kernel diameter (fine enough for smooth density).
+        // _bpVolume = targetDensity / (2 × Σ_k W(k·d_bp)):
+        //   Σ_k is the 1-D kernel sum along one wall (k=0,±1,±2,...) — precomputed here.
+        //   Division by 2 ensures a floor particle at d=0 gets exactly targetDensity/2 from BPs,
+        //   compensating the missing half-circle of fluid. (Akinci 2012, Eq. 4)
+        _bpSpacing = smoothingRadius * 0.5f;
+        float bpSumW = 1f;  // k=0 term: W(0) = 1
+        for (float bpX = _bpSpacing; bpX < smoothingRadius; bpX += _bpSpacing)
+        {
+            float rh = bpX / smoothingRadius;
+            float q  = 1f - rh;
+            bpSumW += 2f * q*q*q*q*(1f + 4f*rh);   // symmetric k and −k
+        }
+        _bpVolume = targetDensity / (2f * bpSumW);
 
         // Allocate GPU buffers
         _paddedN        = Mathf.NextPowerOfTwo(numParticles);
@@ -274,7 +299,8 @@ public class FluidSimGPU2D : MonoBehaviour
             particleMaterial.SetFloat ("_ParticleSize", particleSize);
         }
 
-        _initialized = true;
+        _initialized  = true;
+        _lastBoundsSize = boundsSize;
         /*_paused      = false;*/
         Debug.Log($"[FluidSimGPU2D] Initialized: {numParticles} particles (paddedN={_paddedN}), grid {_gridW}×{_gridH} ({_numCells} cells), targetDensity={targetDensity:F4}, bitonicDispatches={BitonicDispatchCount(_paddedN)}");
     }
@@ -383,6 +409,9 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_InteractionStrength",   interactionStrength);
         computeShader.SetFloat ("_MaxVelocity",           maxVelocity);
         computeShader.SetFloat ("_MaxDensityRatio",       maxDensityRatio);
+        computeShader.SetFloat ("_WallFriction",          wallFriction);
+        computeShader.SetFloat ("_BPSpacing",             _bpSpacing);
+        computeShader.SetFloat ("_BPVolume",              _bpVolume);
         computeShader.SetInt   ("_DebugMode",             debugDensityColor ? 1 : 0);
 
         Vector2 bMin = -boundsSize * 0.5f;
@@ -397,6 +426,11 @@ public class FluidSimGPU2D : MonoBehaviour
     void Update()
     {
         if (!_initialized) return;
+
+        // Detect boundsSize change: grid dimensions and buffer sizes depend on it,
+        // so a full re-init is required (particles reset).
+        if (boundsSize != _lastBoundsSize) Init();
+        if (!_initialized) return;  // guard: Init() sets _initialized
 
         // Controls
         if (Input.GetKeyDown(KeyCode.Space))      _paused = !_paused;
