@@ -31,7 +31,7 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 - Unity version: **2022.3.34f1**
 - Project goal: **2D CPU particle fluid simulation (MVP)** inspired by SebLague/Fluid-Sim
 - Unity MCP plugin:
-  - Package: `com.ivanmurzak.unity.mcp` **v0.51.5**
+  - Package: `com.ivanmurzak.unity.mcp` **v0.51.6**
   - MCP server: `localhost:53540`
 - `.mcp.json` in repo root configures Claude Code to connect to the running Unity Editor MCP server.
 
@@ -60,64 +60,16 @@ Prefer these tools:
    - **LMB** attract, **RMB** repel
    - `interactionRadius`, `interactionStrength` exposed
 4) Performance:
-   - **2k–8k particles** in Editor is acceptable
-   - Must avoid O(n^2) by neighbor search via spatial hash/uniform grid
+   - improve gradually, from 10k to 1M+
 5) Controls:
    - `Space` pause/resume
    - `RightArrow` single-step when paused
    - `R` reset (respawn)
 
-### 3.2 Required file layout (must match)
-Create these assets (paths are strict):
-- `Assets/Scripts/Fluid2D/FluidSim2D.cs`
-- `Assets/Scripts/Fluid2D/SpatialHash2D.cs`
-- `Assets/Scripts/Fluid2D/FluidKernels2D.cs`
-- `Assets/Scripts/Fluid2D/ParticleRenderer2D.cs`
-- `Assets/Shaders/Particles2D_UnlitCircle.shader`
-- `Assets/Scenes/Fluid2D_Demo.unity` (Demo scene)
-
 ---
 
-## 4) Implementation Requirements (CPU-first, stable-first)
-
-### 4.1 Spatial Hash / Uniform Grid (GC-free)
-- Use cell size ≈ `smoothingRadius` (or a constant multiple).
-- Neighbor search checks **3x3** surrounding cells.
-- Avoid allocations per frame:
-  - Reuse `List<int>` / arrays
-  - No LINQ
-- Recommended structure:
-  - `Dictionary<int,int> cellHead` mapping cellKey -> headIndex
-  - `int[] next` as linked list within each bucket
-  - Build buckets each step, then query neighbors by iterating lists.
-
-### 4.2 Fluid model (recommend near-density + near-pressure)
-Goal: stability and “liquid-like” behavior before accuracy.
-
-Recommended approach (2D):
-- For neighbor distance `r < h`:
-  - `q = 1 - r/h` clamped to [0,1]
-  - `density += q^2`
-  - `nearDensity += q^3`
-- Pressures:
-  - `pressure = (density - targetDensity) * pressureMultiplier`
-  - `nearPressure = nearDensity * nearPressureMultiplier`
-- Pressure force:
-  - direction `dir = (xi - xj) / max(r, eps)`
-  - magnitude scales with `pressure*q + nearPressure*q^2`
-  - Must include `eps` to prevent blow-ups at tiny r
-- Viscosity:
-  - use `(vj - vi) * q * viscosityStrength` style smoothing
-- Integration:
-  - semi-implicit Euler
-  - optional substeps via `iterationsPerFrame` (1–4) for stability
-
-### 4.3 Collisions
-- Bounds: AABB centered at (0,0) with half-extents = `boundsSize * 0.5`
-- Obstacle: AABB with half-extents = `obstacleSize * 0.5`
-- On collision:
-  - clamp position to boundary surface
-  - reflect velocity component, multiply by `collisionDamping` (0.9–0.98 typical)
+## 4) Implementation Requirements 
+//
 
 ---
 
@@ -143,34 +95,11 @@ Recommended approach (2D):
 
 ## 6) Default Parameters (stable baseline)
 Provide defaults in `FluidSim2D` that should “look like fluid” out of the box:
-- `numParticles = 4000`
-- `smoothingRadius = 0.2` (world scale dependent)
-- `gravity = -9.8`
-- `collisionDamping = 0.95`
-- `interactionRadius` noticeable (e.g., 0.8–1.5 range) and `interactionStrength` noticeable
-- Provide reasonable starting values for:
-  - `targetDensity`
-  - `pressureMultiplier`
-  - `nearPressureMultiplier`
-  - `viscosityStrength`
-- `iterationsPerFrame = 2` if needed for stability
 
 Also add brief comments in code explaining:
 - increasing pressure multipliers -> stiffer but risk explosion
 - increasing viscosity -> thicker/slower flow
 - decreasing dt / increasing substeps -> more stable
-
----
-
-## 7) Demo Scene Contract (must be reproducible)
-Create `Assets/Scenes/Fluid2D_Demo.unity` via MCP:
-- Root GameObject: `FluidSim2D_Root`
-  - components: `FluidSim2D`, `ParticleRenderer2D`
-- Camera:
-  - Orthographic, positioned to view bounds
-- Material:
-  - `Assets/Materials/Particles2D.mat` using `Particles2D_UnlitCircle.shader`
-- Ensure Play Mode shows fluid immediately without manual wiring.
 
 ---
 
@@ -192,6 +121,46 @@ Work in milestones, validating compilation and behavior after each:
 4) Collisions (bounds + obstacle) correct
 5) Mouse interaction + controls (pause/step/reset)
 6) Rendering correctness + Gizmos + light debug stats (optional)
+
+---
+
+## 10) Git & Version Control
+Purpose: keep experiments isolated and history clean.
+
+### 10.1 Core Rules
+- `main` must always be runnable and stable.
+- Do not develop directly on `main`.
+- Use small, focused commits.
+- Do not commit generated or temporary files.
+
+---
+
+### 10.2 Branching
+- `feature/<name>` — new functionality
+- `exp/<name>` — experimental algorithm variants
+- `fix/<name>` — bug fixes
+
+Rules:
+- Each major algorithm change must use its own branch.
+- Different solution paths must use separate `exp/*` branches.
+- Only merge validated solutions into `main`.
+- Delete unused experiment branches after conclusion.
+
+---
+
+### 10.3 Tags
+Tag stable checkpoints:
+
+```bash
+git tag -a v0.1.0 -m "Stable CPU baseline"
+git push origin v0.1.0
+```
+- Create a tag when:
+  - Stability significantly improves
+  - Performance milestone is reached
+  - Architecture changes substantially
+
+
 
 For each milestone, chat response must include:
 - changed/created asset paths

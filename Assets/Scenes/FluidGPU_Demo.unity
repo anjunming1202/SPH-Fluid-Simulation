@@ -151,7 +151,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cfdf322cb0f49ec45931c6e36c108e1d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  numParticles: 500000
+  numParticles: 1000000
   substeps: 1
   forceSubsteps: 1
   maxDt: 0.005
@@ -165,7 +165,8 @@ MonoBehaviour:
   viscosityStrength: 40
   collisionDamping: 0.4
   maxVelocity: 200
-  boundsSize: {x: 45, y: 27}
+  maxDensityRatio: 4
+  boundsSize: {x: 64, y: 38}
   obstacleCentre: {x: 10.42, y: 1.56}
   obstacleSize: {x: 0.42, y: 21.8}
   interactionRadius: 1.5
@@ -177,6 +178,8 @@ MonoBehaviour:
   debugDensityScale: 10
   computeShader: {fileID: 7200000, guid: fb0cc9f9f68df084495725ed07575035, type: 3}
   bitonicShader: {fileID: 7200000, guid: 4eaba21f07957a34d88d718d49a0404d, type: 3}
+  countingSortShader: {fileID: 7200000, guid: 93e290f1fe017e94aabc03940c1e0768, type: 3}
+  useBitonicSort: 0
 --- !u!4 &702809166
 Transform:
   m_ObjectHideFlags: 0
@@ -253,7 +256,7 @@ Camera:
   far clip plane: 1000
   field of view: 60
   orthographic: 1
-  orthographic size: 14
+  orthographic size: 20
   m_Depth: -1
   m_CullingMask:
     serializedVersion: 2

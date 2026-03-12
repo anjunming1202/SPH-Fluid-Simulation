@@ -1,0 +1,167 @@
+// CountingSort.compute
+// O(N) GPU counting sort for SPH spatial hash.
+// Replaces O(N log²N) Bitonic Sort: 1M-particle sort drops from ~210 dispatches to 6.
+//
+// Dispatch order per substep (after GravityPredict):
+//   ClearCounts → CountParticles → LocalScan → GlobalScan → Finalize → Scatter
+// After Scatter: _SortIndices and _CellStart/_CellEnd are ready for ComputeDensity.
+
+#pragma kernel ClearCounts
+#pragma kernel CountParticles
+#pragma kernel LocalScan
+#pragma kernel GlobalScan
+#pragma kernel Finalize
+#pragma kernel Scatter
+
+// Shared buffers (also bound in FluidCompute2D)
+RWStructuredBuffer<float2> _Predicted;       // [numParticles]
+RWStructuredBuffer<uint>   _SortIndices;     // [numParticles] output: particle ID at sorted pos
+RWStructuredBuffer<uint>   _CellStart;       // [numCells] first sorted index for each cell
+RWStructuredBuffer<uint>   _CellEnd;         // [numCells] one-past-last sorted index
+
+// Counting sort internal buffers
+RWStructuredBuffer<uint>   _CellCount;       // [numCells] particle count per cell
+RWStructuredBuffer<uint>   _CellWritePtr;    // [numCells] atomic write pointer for scatter
+RWStructuredBuffer<uint>   _TileSums;        // [numTiles] inter-tile prefix sums
+
+int    _NumParticles;
+int    _NumCells;
+int    _NumTiles;   // = ceil(numCells / TILE_SIZE)
+int    _GridW;
+int    _GridH;
+float  _CellSize;
+float2 _BoundsMin;
+
+#define TILE_SIZE 1024
+
+int CellIndexCS(int cx, int cy) { return cy * _GridW + cx; }
+
+void WorldToCellCS(float2 p, out int cx, out int cy)
+{
+    cx = (int)floor((p.x - _BoundsMin.x) / _CellSize);
+    cy = (int)floor((p.y - _BoundsMin.y) / _CellSize);
+    cx = clamp(cx, 0, _GridW - 1);
+    cy = clamp(cy, 0, _GridH - 1);
+}
+
+// ── Kernel 1: ClearCounts ─────────────────────────────────────────────────────
+// Zero particle counts; set CellStart sentinel for empty-cell detection.
+[numthreads(64, 1, 1)]
+void ClearCounts(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_NumCells) return;
+    _CellCount[id.x] = 0u;
+    _CellStart[id.x] = 0x7FFFFFFFu;   // sentinel: "no particles"
+}
+
+// ── Kernel 2: CountParticles ──────────────────────────────────────────────────
+// Atomically count particles per cell using predicted positions.
+[numthreads(64, 1, 1)]
+void CountParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= (uint)_NumParticles) return;
+    int cx, cy;
+    WorldToCellCS(_Predicted[i], cx, cy);
+    InterlockedAdd(_CellCount[(uint)CellIndexCS(cx, cy)], 1u);
+}
+
+// ── Kernel 3: LocalScan ───────────────────────────────────────────────────────
+// Each threadgroup computes a Blelloch exclusive prefix-sum over TILE_SIZE cells.
+// Partial results → _CellStart; per-tile totals → _TileSums.
+groupshared uint gs_tile[TILE_SIZE];
+
+[numthreads(TILE_SIZE, 1, 1)]
+void LocalScan(uint3 id  : SV_DispatchThreadID,
+               uint3 gid : SV_GroupID,
+               uint  lid : SV_GroupIndex)
+{
+    uint gIdx = id.x;
+
+    // Load — out-of-bounds cells contribute 0
+    gs_tile[lid] = (gIdx < (uint)_NumCells) ? _CellCount[gIdx] : 0u;
+    GroupMemoryBarrierWithGroupSync();
+
+    // Up-sweep (reduce)
+    for (uint stride = 1u; stride < TILE_SIZE; stride <<= 1u)
+    {
+        uint idx = (lid + 1u) * (stride << 1u) - 1u;
+        if (idx < TILE_SIZE)
+            gs_tile[idx] += gs_tile[idx - stride];
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // Save tile total; zero root for down-sweep
+    if (lid == TILE_SIZE - 1u)
+    {
+        _TileSums[gid.x]        = gs_tile[TILE_SIZE - 1u];
+        gs_tile[TILE_SIZE - 1u] = 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Down-sweep
+    for (uint stride = TILE_SIZE >> 1u; stride > 0u; stride >>= 1u)
+    {
+        uint idx = (lid + 1u) * (stride << 1u) - 1u;
+        if (idx < TILE_SIZE)
+        {
+            uint tmp             = gs_tile[idx - stride];
+            gs_tile[idx - stride] = gs_tile[idx];
+            gs_tile[idx]         += tmp;
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // Write partial exclusive prefix sum
+    if (gIdx < (uint)_NumCells)
+        _CellStart[gIdx] = gs_tile[lid];
+}
+
+// ── Kernel 4: GlobalScan ──────────────────────────────────────────────────────
+// Sequential exclusive prefix-sum over tile totals.
+// numTiles is small (~955 for 1M in 64×38) — sequential is negligible cost.
+[numthreads(1, 1, 1)]
+void GlobalScan(uint3 id : SV_DispatchThreadID)
+{
+    uint sum = 0u;
+    for (uint i = 0u; i < (uint)_NumTiles; i++)
+    {
+        uint t       = _TileSums[i];
+        _TileSums[i] = sum;
+        sum         += t;
+    }
+}
+
+// ── Kernel 5: Finalize ────────────────────────────────────────────────────────
+// Add tile offset to each local prefix sum → final absolute _CellStart.
+// Set _CellEnd = _CellStart + _CellCount.
+// Copy _CellStart to _CellWritePtr (used as atomic scatter pointer).
+[numthreads(TILE_SIZE, 1, 1)]
+void Finalize(uint3 id  : SV_DispatchThreadID,
+              uint3 gid : SV_GroupID)
+{
+    uint gIdx = id.x;
+    if (gIdx >= (uint)_NumCells) return;
+
+    uint offset           = _CellStart[gIdx] + _TileSums[gid.x];
+    _CellStart[gIdx]      = offset;
+    _CellEnd[gIdx]        = offset + _CellCount[gIdx];
+    _CellWritePtr[gIdx]   = offset;
+}
+
+// ── Kernel 6: Scatter ─────────────────────────────────────────────────────────
+// Each particle atomically claims a slot in its cell and writes its index.
+[numthreads(64, 1, 1)]
+void Scatter(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= (uint)_NumParticles) return;
+
+    int cx, cy;
+    WorldToCellCS(_Predicted[i], cx, cy);
+    uint cellIdx = (uint)CellIndexCS(cx, cy);
+
+    uint slot;
+    InterlockedAdd(_CellWritePtr[cellIdx], 1u, slot);
+    _SortIndices[slot] = i;
+}

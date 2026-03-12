@@ -92,6 +92,10 @@ public class FluidSimGPU2D : MonoBehaviour
     [Header("References")]
     public ComputeShader computeShader;
     public ComputeShader bitonicShader;
+    [Tooltip("O(N) counting sort — much faster than Bitonic at large N. Assign CountingSort.compute.")]
+    public ComputeShader countingSortShader;
+    [Tooltip("Fall back to O(N log²N) Bitonic Sort (slower, for debugging only).")]
+    public bool useBitonicSort = false;
 
     // ── ComputeBuffers ───────────────────────────────────────────────────────
     ComputeBuffer _positions, _velocities, _predicted;
@@ -100,23 +104,34 @@ public class FluidSimGPU2D : MonoBehaviour
     ComputeBuffer _cellStart, _cellEnd;     // [numCells] index range per cell
     ComputeBuffer _renderData;
     ComputeBuffer _argsBuffer;
+    // Counting sort buffers
+    ComputeBuffer _cellCount, _cellWritePtr, _tileSums;
 
     // ── Grid ─────────────────────────────────────────────────────────────────
     int   _gridW, _gridH, _numCells;
     float _cellSize;
-    int   _paddedN;  // next power of 2 >= numParticles (for Bitonic Sort)
+    int   _paddedN;    // next power of 2 >= numParticles (for Bitonic Sort)
+    int   _numTiles;   // ceil(numCells / 1024) for counting sort prefix sum
 
     // ── Kernel IDs ────────────────────────────────────────────────────────────
     int _kClearCellStarts, _kGravityPredict, _kComputeKeys, _kCalcCellStarts;
     int _kComputeDensity, _kComputeForce, _kIntegrate, _kBuildRenderData;
     int _kQueryDensityAtPos;
     int _kBitonicStep;
+    // Counting sort kernel IDs
+    int _kClearCounts, _kCountParticles, _kLocalScan, _kGlobalScan, _kFinalize, _kScatter;
 
     // ── Debug query ───────────────────────────────────────────────────────────
     ComputeBuffer _queryBuffer;     // [0]=density [1]=nearDensity
     float[]       _queryData = new float[2];
     Vector2       _queryWorldPos;
     bool          _queryActive;
+
+    // ── Stability monitor ──────────────────────────────────────────────────────
+    // Reads back one render data sample per second to detect NaN/explosion.
+    float    _stabilityTimer;
+    Vector4[] _stabilityReadback = new Vector4[1];  // float4 stride matches _renderData
+    int      _explosionFrameCount;
     Material      _glMat;           // for GL circle overlay
 
     // ── Runtime state ─────────────────────────────────────────────────────────
@@ -177,6 +192,7 @@ public class FluidSimGPU2D : MonoBehaviour
 
         // Allocate GPU buffers
         _paddedN        = Mathf.NextPowerOfTwo(numParticles);
+        _numTiles       = Mathf.CeilToInt((float)_numCells / 1024f);
         _positions      = new ComputeBuffer(numParticles, 2 * sizeof(float));
         _velocities     = new ComputeBuffer(numParticles, 2 * sizeof(float));
         _predicted      = new ComputeBuffer(numParticles, 2 * sizeof(float));
@@ -189,6 +205,9 @@ public class FluidSimGPU2D : MonoBehaviour
         _cellEnd        = new ComputeBuffer(_numCells,        sizeof(uint));
         _renderData     = new ComputeBuffer(numParticles, 4 * sizeof(float));
         _queryBuffer    = new ComputeBuffer(2,                sizeof(float));
+        _cellCount      = new ComputeBuffer(_numCells,         sizeof(uint));
+        _cellWritePtr   = new ComputeBuffer(_numCells,         sizeof(uint));
+        _tileSums       = new ComputeBuffer(Mathf.Max(_numTiles, 1), sizeof(uint));
 
         // Indirect args: indexCount, instanceCount, startIndex, baseVertex, startInstance
         _argsBuffer = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
@@ -222,6 +241,23 @@ public class FluidSimGPU2D : MonoBehaviour
         else
         {
             Debug.LogError("[FluidSimGPU2D] bitonicShader not assigned! Assign BitonicSort.compute in the Inspector.");
+        }
+
+        // CountingSort.compute setup
+        if (countingSortShader != null)
+        {
+            _kClearCounts    = countingSortShader.FindKernel("ClearCounts");
+            _kCountParticles = countingSortShader.FindKernel("CountParticles");
+            _kLocalScan      = countingSortShader.FindKernel("LocalScan");
+            _kGlobalScan     = countingSortShader.FindKernel("GlobalScan");
+            _kFinalize       = countingSortShader.FindKernel("Finalize");
+            _kScatter        = countingSortShader.FindKernel("Scatter");
+            BindCountingSortBuffers();
+        }
+        else if (!useBitonicSort)
+        {
+            Debug.LogWarning("[FluidSimGPU2D] countingSortShader not assigned — falling back to Bitonic Sort.");
+            useBitonicSort = true;
         }
 
         // Spawn particles in a grid
@@ -298,6 +334,30 @@ public class FluidSimGPU2D : MonoBehaviour
         }
     }
 
+    // ── Counting sort buffer binding ──────────────────────────────────────────
+    void BindCountingSortBuffers()
+    {
+        int[] kernels = { _kClearCounts, _kCountParticles, _kLocalScan, _kGlobalScan, _kFinalize, _kScatter };
+        foreach (int k in kernels)
+        {
+            countingSortShader.SetBuffer(k, "_Predicted",    _predicted);
+            countingSortShader.SetBuffer(k, "_SortIndices",  _sortIndices);
+            countingSortShader.SetBuffer(k, "_CellStart",    _cellStart);
+            countingSortShader.SetBuffer(k, "_CellEnd",      _cellEnd);
+            countingSortShader.SetBuffer(k, "_CellCount",    _cellCount);
+            countingSortShader.SetBuffer(k, "_CellWritePtr", _cellWritePtr);
+            countingSortShader.SetBuffer(k, "_TileSums",     _tileSums);
+        }
+        Vector2 bMin = -boundsSize * 0.5f;
+        countingSortShader.SetInt   ("_NumParticles", numParticles);
+        countingSortShader.SetInt   ("_NumCells",     _numCells);
+        countingSortShader.SetInt   ("_NumTiles",     _numTiles);
+        countingSortShader.SetInt   ("_GridW",        _gridW);
+        countingSortShader.SetInt   ("_GridH",        _gridH);
+        countingSortShader.SetFloat ("_CellSize",     _cellSize);
+        countingSortShader.SetFloats("_BoundsMin",    bMin.x, bMin.y);
+    }
+
     // ── Static uniforms (set once at Init) ───────────────────────────────────
     void SetStaticUniforms()
     {
@@ -345,6 +405,8 @@ public class FluidSimGPU2D : MonoBehaviour
 
         if (!_paused)
             SimStep();
+
+        CheckStability();
 
         // Debug density query: hold Alt to sample density at cursor
         _queryActive = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
@@ -419,16 +481,25 @@ public class FluidSimGPU2D : MonoBehaviour
         {
             computeShader.SetFloat("_DeltaTime", dt);
 
-            // ── Grid phase (once per substep — includes Bitonic Sort) ──────────
-            // 1. Reset cell ranges
-            computeShader.Dispatch(_kClearCellStarts, cGroups, 1, 1);
-            // 2. Gravity + predicted positions (uses full dt for prediction)
-            computeShader.Dispatch(_kGravityPredict,  pGroups, 1, 1);
-            // 3. Assign cell key to each particle
-            computeShader.Dispatch(_kComputeKeys,     kGroups, 1, 1);
-            // 4. Sort particles by cell key (Bitonic Sort — most expensive part)
-            if (bitonicShader != null)
+            // ── Grid phase (once per substep) ─────────────────────────────────
+            // 1. Gravity + predicted positions (uses full dt for prediction)
+            computeShader.Dispatch(_kGravityPredict, pGroups, 1, 1);
+            // 2. Sort particles into cell order and compute CellStart/CellEnd
+            if (!useBitonicSort && countingSortShader != null)
             {
+                // O(N) counting sort — 6 dispatches vs ~210 for Bitonic at 1M
+                countingSortShader.Dispatch(_kClearCounts,    cGroups,   1, 1);
+                countingSortShader.Dispatch(_kCountParticles, pGroups,   1, 1);
+                countingSortShader.Dispatch(_kLocalScan,      _numTiles, 1, 1);
+                countingSortShader.Dispatch(_kGlobalScan,     1,         1, 1);
+                countingSortShader.Dispatch(_kFinalize,       _numTiles, 1, 1);
+                countingSortShader.Dispatch(_kScatter,        pGroups,   1, 1);
+            }
+            else if (bitonicShader != null)
+            {
+                // O(N log²N) Bitonic Sort fallback
+                computeShader.Dispatch(_kClearCellStarts, cGroups, 1, 1);
+                computeShader.Dispatch(_kComputeKeys,     kGroups, 1, 1);
                 for (int k = 2; k <= _paddedN; k <<= 1)
                     for (int j = k >> 1; j > 0; j >>= 1)
                     {
@@ -436,9 +507,8 @@ public class FluidSimGPU2D : MonoBehaviour
                         bitonicShader.SetInt("_StepK", k);
                         bitonicShader.Dispatch(_kBitonicStep, bGroups, 1, 1);
                     }
+                computeShader.Dispatch(_kCalcCellStarts, pGroups, 1, 1);
             }
-            // 5. Find each cell's run in the sorted array
-            computeShader.Dispatch(_kCalcCellStarts,  pGroups, 1, 1);
             // 6. Compute density (once per substep, shared across force iterations)
             computeShader.Dispatch(_kComputeDensity,  pGroups, 1, 1);
 
@@ -461,6 +531,39 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.Dispatch(_kBuildRenderData, pGroups, 1, 1);
     }
 
+    // ── Stability monitor ─────────────────────────────────────────────────────
+    // Reads back a single particle's render data once per second to detect
+    // NaN/Inf or extreme velocities that a screenshot would miss.
+    void CheckStability()
+    {
+        if (!_initialized) return;
+        _stabilityTimer += Time.unscaledDeltaTime;
+        if (_stabilityTimer < 1f) return;
+        _stabilityTimer = 0f;
+
+        // Sample particle 0 — _renderData stride is float4 (16 bytes)
+        _renderData.GetData(_stabilityReadback, 0, 0, 1);
+        float px      = _stabilityReadback[0].x;
+        float py      = _stabilityReadback[0].y;
+        float speedSq = _stabilityReadback[0].z;
+
+        bool nanDetected  = float.IsNaN(px) || float.IsNaN(py) || float.IsNaN(speedSq);
+        bool oobDetected  = Mathf.Abs(px) > boundsSize.x || Mathf.Abs(py) > boundsSize.y;
+        bool fastDetected = speedSq > maxVelocity * maxVelocity * 0.5f;
+
+        if (nanDetected || oobDetected || fastDetected)
+        {
+            _explosionFrameCount++;
+            Debug.LogWarning($"[Stability] frame={Time.frameCount} NaN={nanDetected} OOB={oobDetected} highSpeed={fastDetected} " +
+                             $"pos=({px:F2},{py:F2}) speed={Mathf.Sqrt(speedSq):F1} (alert #{_explosionFrameCount})");
+        }
+        else
+        {
+            Debug.Log($"[Stability] OK — fps={1f/Time.smoothDeltaTime:F0} " +
+                      $"pos0=({px:F2},{py:F2}) speed={Mathf.Sqrt(speedSq):F1} alerts={_explosionFrameCount}");
+        }
+    }
+
     // ── Cleanup ───────────────────────────────────────────────────────────────
     void ReleaseBuffers()
     {
@@ -477,6 +580,9 @@ public class FluidSimGPU2D : MonoBehaviour
         _renderData?.Release();    _renderData    = null;
         _argsBuffer?.Release();    _argsBuffer    = null;
         _queryBuffer?.Release();   _queryBuffer   = null;
+        _cellCount?.Release();     _cellCount     = null;
+        _cellWritePtr?.Release();  _cellWritePtr  = null;
+        _tileSums?.Release();      _tileSums      = null;
         _initialized = false;
     }
 

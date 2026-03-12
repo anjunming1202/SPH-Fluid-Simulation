@@ -169,9 +169,9 @@ void ComputeDensity(uint3 id : SV_DispatchThreadID)
         int nx = cx + dx, ny = cy + dy;
         if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
         int  cellIdx = CellIndex(nx, ny);
-        uint start   = _CellStart[cellIdx];
-        if (start == 0x7FFFFFFF) continue;   // empty cell
-        uint end = _CellEnd[cellIdx];
+        uint start = _CellStart[cellIdx];
+        uint end   = _CellEnd[cellIdx];
+        if (start >= end) continue;   // empty cell
 
         for (uint s = start; s < end; s++)
         {
@@ -226,9 +226,9 @@ void ComputeForce(uint3 id : SV_DispatchThreadID)
         int nx = cx + dx, ny = cy + dy;
         if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
         int  cellIdx = CellIndex(nx, ny);
-        uint start   = _CellStart[cellIdx];
-        if (start == 0x7FFFFFFF) continue;   // empty cell
-        uint end = _CellEnd[cellIdx];
+        uint start = _CellStart[cellIdx];
+        uint end   = _CellEnd[cellIdx];
+        if (start >= end) continue;   // empty cell
 
         for (uint s = start; s < end; s++)
         {
@@ -374,9 +374,9 @@ void QueryDensityAtPos(uint3 id : SV_DispatchThreadID)
         int nx = cx + dx, ny = cy + dy;
         if (nx < 0 || nx >= _GridW || ny < 0 || ny >= _GridH) continue;
         int  cellIdx = CellIndex(nx, ny);
-        uint start   = _CellStart[cellIdx];
-        if (start == 0x7FFFFFFF) continue;
-        uint end = _CellEnd[cellIdx];
+        uint start = _CellStart[cellIdx];
+        uint end   = _CellEnd[cellIdx];
+        if (start >= end) continue;
 
         for (uint s = start; s < end; s++)
         {
