@@ -164,9 +164,10 @@ public class FluidSimGPU2D : MonoBehaviour
         {
             float area = boundsSize.x * boundsSize.y;
             // Wendland C2 kernel: ∫(1-r/h)⁴(1+4r/h) 2πr dr over [0,h] = πh²/7
-            // Rest density = n × integral = (N/area) × (πh²/7)
-            // Factor 7 replaces the old 3 (which was empirically tuned for q² kernel).
-            targetDensity = numParticles * Mathf.PI * smoothingRadius * smoothingRadius / (7f * area);
+            // Theoretical "uniform fill" gives divisor 7, but particles settle into a pile
+            // filling ~half the bounds → actual bulk density ≈ 2× the theoretical value.
+            // Empirical divisor = 7/2 = 3.5 (same 2× correction the old q² code used: 6/2=3).
+            targetDensity = numParticles * Mathf.PI * smoothingRadius * smoothingRadius / (3.5f * area);
             Debug.Log($"[FluidSimGPU2D] autoRestDensity (Wendland) → targetDensity = {targetDensity:F4} (N={numParticles}, h={smoothingRadius}, area={area:F1})");
         }
 
@@ -436,16 +437,18 @@ public class FluidSimGPU2D : MonoBehaviour
             // 6. Compute density (once per substep, shared across force iterations)
             computeShader.Dispatch(_kComputeDensity,  pGroups, 1, 1);
 
-            // ── Force phase (forceSubsteps times, reusing the same density/grid) ──
-            // Each force sub-iteration uses dtForce = dt/forceSubsteps so the
-            // total displacement per substep is the same, but pressure forces are
-            // applied in smaller increments — equivalent stability to substeps×forceSubsteps
-            // full cycles without the Bitonic Sort cost of each.
+            // ── Force phase (forceSubsteps times, density recomputed each iteration) ──
+            // Grid (CellStart/CellEnd) is reused — valid because displacement per
+            // force step is small (dt/forceSubsteps). Density IS recomputed each
+            // iteration so pressure spikes are caught and corrected immediately.
+            // This gives equivalent stability to substeps×forceSubsteps full cycles
+            // but with only 1 Bitonic Sort per substep instead of forceSubsteps sorts.
             computeShader.SetFloat("_DeltaTime", dtForce);
             for (int f = 0; f < forceSubsteps; f++)
             {
-                computeShader.Dispatch(_kComputeForce, pGroups, 1, 1);
-                computeShader.Dispatch(_kIntegrate,    pGroups, 1, 1);
+                computeShader.Dispatch(_kComputeDensity, pGroups, 1, 1);  // recompute at current positions
+                computeShader.Dispatch(_kComputeForce,   pGroups, 1, 1);
+                computeShader.Dispatch(_kIntegrate,      pGroups, 1, 1);
             }
         }
 

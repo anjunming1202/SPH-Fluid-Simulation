@@ -152,7 +152,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   numParticles: 100000
-  substeps: 2
+  substeps: 1
+  forceSubsteps: 1
   maxDt: 0.005
   gravity: -9.15
   smoothingRadius: 0.05
@@ -160,11 +161,11 @@ MonoBehaviour:
   targetDensity: 3
   pressureMultiplier: 80
   cohesionPressure: 10
-  nearPressureMultiplier: 18
+  nearPressureMultiplier: 8
   viscosityStrength: 40
   collisionDamping: 0.4
   maxVelocity: 200
-  boundsSize: {x: 13, y: 9}
+  boundsSize: {x: 20, y: 12}
   obstacleCentre: {x: 10.42, y: 1.56}
   obstacleSize: {x: 0.42, y: 21.8}
   interactionRadius: 1.5
@@ -252,7 +253,7 @@ Camera:
   far clip plane: 1000
   field of view: 60
   orthographic: 1
-  orthographic size: 5
+  orthographic size: 10
   m_Depth: -1
   m_CullingMask:
     serializedVersion: 2
