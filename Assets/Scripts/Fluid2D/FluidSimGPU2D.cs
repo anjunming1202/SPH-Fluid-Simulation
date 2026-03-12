@@ -55,6 +55,10 @@ public class FluidSimGPU2D : MonoBehaviour
     [Tooltip("Emergency speed cap. CFL-adaptive dt is the real stability mechanism; this only catches extremes.")]
     public float maxVelocity          = 200f;
 
+    [Tooltip("Clamp density to this multiple of targetDensity before computing pressure. " +
+             "Limits runaway forces from transient particle overlaps. 3-5 is typical; higher = less clamping.")]
+    public float maxDensityRatio      = 4f;
+
     // ── World ────────────────────────────────────────────────────────────────
     [Header("World")]
     public Vector2 boundsSize      = new Vector2(16f, 9f);
@@ -318,6 +322,7 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloat ("_InteractionRadius",     interactionRadius);
         computeShader.SetFloat ("_InteractionStrength",   interactionStrength);
         computeShader.SetFloat ("_MaxVelocity",           maxVelocity);
+        computeShader.SetFloat ("_MaxDensityRatio",       maxDensityRatio);
         computeShader.SetInt   ("_DebugMode",             debugDensityColor ? 1 : 0);
 
         Vector2 bMin = -boundsSize * 0.5f;

@@ -151,7 +151,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cfdf322cb0f49ec45931c6e36c108e1d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  numParticles: 100000
+  numParticles: 500000
   substeps: 1
   forceSubsteps: 1
   maxDt: 0.005
@@ -165,7 +165,7 @@ MonoBehaviour:
   viscosityStrength: 40
   collisionDamping: 0.4
   maxVelocity: 200
-  boundsSize: {x: 20, y: 12}
+  boundsSize: {x: 45, y: 27}
   obstacleCentre: {x: 10.42, y: 1.56}
   obstacleSize: {x: 0.42, y: 21.8}
   interactionRadius: 1.5
@@ -253,7 +253,7 @@ Camera:
   far clip plane: 1000
   field of view: 60
   orthographic: 1
-  orthographic size: 10
+  orthographic size: 14
   m_Depth: -1
   m_CullingMask:
     serializedVersion: 2
