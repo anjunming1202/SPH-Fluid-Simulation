@@ -156,6 +156,7 @@ MonoBehaviour:
   maxDt: 0.005
   gravity: -9.15
   smoothingRadius: 0.05
+  autoRestDensity: 1
   targetDensity: 3
   pressureMultiplier: 80
   cohesionPressure: 10
@@ -164,8 +165,8 @@ MonoBehaviour:
   collisionDamping: 0.4
   maxVelocity: 200
   boundsSize: {x: 13, y: 9}
-  obstacleCentre: {x: 4.69, y: 0.7}
-  obstacleSize: {x: 0.19, y: 9.8}
+  obstacleCentre: {x: 10.42, y: 1.56}
+  obstacleSize: {x: 0.42, y: 21.8}
   interactionRadius: 1.5
   interactionStrength: 50
   particleMesh: {fileID: 0}

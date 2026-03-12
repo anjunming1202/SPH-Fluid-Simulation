@@ -178,9 +178,11 @@ void ComputeDensity(uint3 id : SV_DispatchThreadID)
             float2 d = pi - _Predicted[j];
             float  r = length(d);
             if (r >= h) continue;
-            float q = 1.0 - r / h;
-            density     += q * q;
-            nearDensity += q * q * q;
+            float q  = 1.0 - r / h;
+            float rh = r / h;
+            // Wendland C2 kernel: eliminates pairing instability vs B-spline
+            density     += q * q * q * q * (1.0 + 4.0 * rh);
+            nearDensity += q * q * q;   // keep q³ for short-range repulsion
         }
     }
 
@@ -374,8 +376,9 @@ void QueryDensityAtPos(uint3 id : SV_DispatchThreadID)
             float2 d = qp - _Predicted[j];
             float  r = length(d);
             if (r >= h) continue;
-            float q = 1.0 - r / h;
-            density     += q * q;
+            float q  = 1.0 - r / h;
+            float rh = r / h;
+            density     += q * q * q * q * (1.0 + 4.0 * rh);
             nearDensity += q * q * q;
         }
     }

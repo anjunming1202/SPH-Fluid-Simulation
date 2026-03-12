@@ -21,9 +21,14 @@ public class FluidSimGPU2D : MonoBehaviour
     [Tooltip("Total particle count. 100k is Phase 1 target.")]
     public int numParticles = 100000;
 
-    [Tooltip("Sub-steps per frame. More = stable, slower.")]
-    [Range(1, 5)]
-    public int substeps = 3;
+    [Tooltip("Full substeps per frame (each rebuilds the sort grid). Keep at 1 for most cases.")]
+    [Range(1, 4)]
+    public int substeps = 1;
+
+    [Tooltip("Force-only sub-iterations per substep. Grid is built once, Force+Integrate run this many times. " +
+             "Increases stability at low extra cost (no extra Bitonic Sort).")]
+    [Range(1, 8)]
+    public int forceSubsteps = 3;
 
     public float maxDt = 0.01f;
 
@@ -158,8 +163,11 @@ public class FluidSimGPU2D : MonoBehaviour
         if (autoRestDensity)
         {
             float area = boundsSize.x * boundsSize.y;
-            targetDensity = numParticles * Mathf.PI * smoothingRadius * smoothingRadius / (3f * area);
-            Debug.Log($"[FluidSimGPU2D] autoRestDensity → targetDensity = {targetDensity:F4} (N={numParticles}, h={smoothingRadius}, area={area:F1})");
+            // Wendland C2 kernel: ∫(1-r/h)⁴(1+4r/h) 2πr dr over [0,h] = πh²/7
+            // Rest density = n × integral = (N/area) × (πh²/7)
+            // Factor 7 replaces the old 3 (which was empirically tuned for q² kernel).
+            targetDensity = numParticles * Mathf.PI * smoothingRadius * smoothingRadius / (7f * area);
+            Debug.Log($"[FluidSimGPU2D] autoRestDensity (Wendland) → targetDensity = {targetDensity:F4} (N={numParticles}, h={smoothingRadius}, area={area:F1})");
         }
 
         // Allocate GPU buffers
@@ -395,21 +403,24 @@ public class FluidSimGPU2D : MonoBehaviour
         computeShader.SetFloats("_MouseWorld", mouseWorld.x, mouseWorld.y);
 
         int pGroups = Mathf.CeilToInt((float)numParticles / 64f);
-        int kGroups = Mathf.CeilToInt((float)_paddedN     / 64f);  // ComputeKeys
+        int kGroups = Mathf.CeilToInt((float)_paddedN     / 64f);
         int cGroups = Mathf.CeilToInt((float)_numCells    / 64f);
-        int bGroups = Mathf.CeilToInt((float)_paddedN     / 256f); // BitonicStep
+        int bGroups = Mathf.CeilToInt((float)_paddedN     / 256f);
+
+        float dtForce = dt / forceSubsteps;
 
         for (int s = 0; s < substeps; s++)
         {
             computeShader.SetFloat("_DeltaTime", dt);
 
+            // ── Grid phase (once per substep — includes Bitonic Sort) ──────────
             // 1. Reset cell ranges
             computeShader.Dispatch(_kClearCellStarts, cGroups, 1, 1);
-            // 2. Gravity + predicted positions
+            // 2. Gravity + predicted positions (uses full dt for prediction)
             computeShader.Dispatch(_kGravityPredict,  pGroups, 1, 1);
-            // 3. Assign cell key to each particle (fills _SortKeys/_SortIndices)
+            // 3. Assign cell key to each particle
             computeShader.Dispatch(_kComputeKeys,     kGroups, 1, 1);
-            // 4. Sort particles by cell key
+            // 4. Sort particles by cell key (Bitonic Sort — most expensive part)
             if (bitonicShader != null)
             {
                 for (int k = 2; k <= _paddedN; k <<= 1)
@@ -422,10 +433,20 @@ public class FluidSimGPU2D : MonoBehaviour
             }
             // 5. Find each cell's run in the sorted array
             computeShader.Dispatch(_kCalcCellStarts,  pGroups, 1, 1);
-            // 6. SPH density → force → integrate
+            // 6. Compute density (once per substep, shared across force iterations)
             computeShader.Dispatch(_kComputeDensity,  pGroups, 1, 1);
-            computeShader.Dispatch(_kComputeForce,    pGroups, 1, 1);
-            computeShader.Dispatch(_kIntegrate,       pGroups, 1, 1);
+
+            // ── Force phase (forceSubsteps times, reusing the same density/grid) ──
+            // Each force sub-iteration uses dtForce = dt/forceSubsteps so the
+            // total displacement per substep is the same, but pressure forces are
+            // applied in smaller increments — equivalent stability to substeps×forceSubsteps
+            // full cycles without the Bitonic Sort cost of each.
+            computeShader.SetFloat("_DeltaTime", dtForce);
+            for (int f = 0; f < forceSubsteps; f++)
+            {
+                computeShader.Dispatch(_kComputeForce, pGroups, 1, 1);
+                computeShader.Dispatch(_kIntegrate,    pGroups, 1, 1);
+            }
         }
 
         // Update render buffer once after all substeps
@@ -576,7 +597,7 @@ public class FluidSimGPU2D : MonoBehaviour
         GUI.Label(new Rect(10, 10, 500, 100),
             $"GPU Fluid [{numParticles:N0} particles]  FPS: {1f / Time.smoothDeltaTime:F0}  " +
             $"{(_paused ? "| PAUSED" : "")}\n" +
-            $"ρ₀={targetDensity:F3}  h={smoothingRadius:F4}  P={pressureMultiplier}  substeps={substeps}\n" +
+            $"ρ₀={targetDensity:F3}  h={smoothingRadius:F4}  P={pressureMultiplier}  s={substeps}×f={forceSubsteps}\n" +
             $"Space=pause  →=step  R=reset  Alt=density probe",
             style);
 
