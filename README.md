@@ -91,7 +91,7 @@ Bottleneck at high particle counts is `ComputeDensity` + `ComputeForce` (O(N*k) 
 **Requirements:** Unity 2022.3 LTS
 
 ```bash
-git clone https://github.com/user/gpu-fluid-sim-2d.git   # update with your URL
+git clone https://github.com/anjunming1202/SPH-Fluid-Simulation.git
 ```
 
 1. Open the project in Unity 2022.3
