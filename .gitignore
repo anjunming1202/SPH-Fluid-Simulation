@@ -48,3 +48,12 @@ crashlytics-build.properties
 
 # MCP server config (contains local port, keep if desired)
 # .mcp.json
+
+# Large video files (keep GIFs only)
+*.mp4
+
+# Plugins (third-party, not tracked)
+Assets/Plugins/
+
+# Local notes
+其它日志记录/
